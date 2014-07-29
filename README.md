@@ -1,4 +1,6 @@
 TSP_KSwap
 =========
 
-2-opt with K-swap
+We developed a GPU implementation of iterative 2-opt which provides an option to perform up to K-swaps at a time.
+
+
