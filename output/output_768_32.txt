@@ -1,0 +1,8 @@
+2-opt TSP CUDA GPU code v2.1 [Kepler]
+Copyright (c) 2014, Texas State University. All rights reserved.
+configuration: 1400 cities, 1000 restarts, ..\problems\fl1400.tsp input
+Blocks = 1000, Threads  = 768, TileSize = 32, Status = MORE_THREADS_THAN_BUFFER
+13.3256Gmoves/s
+best found tour length = 23955
+Total Time : 134.579s
+Hours = 0, Minutes = 2, Seconds = 14 Milliseconds = 578
