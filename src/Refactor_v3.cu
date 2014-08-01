@@ -22,7 +22,7 @@
 
 static __device__ __managed__ int climbs_d = 0;
 static __device__ __managed__ int best_d = INT_MAX;
-
+static __device__ int restart_d = 0;
 // Buffer space, used for cache and maximum propagation
 extern __shared__ char buffer[];	// Our pool of memory to hand out to other three
 __shared__ float *x_buffer;
@@ -36,6 +36,16 @@ struct __align__(16) Data {
 	float x,y;
 };
 
+//
+// Returns a unique integer value with the intial value being 0
+//
+// @return  - Returns the next unique int
+static __device__ int nextInt() {
+	if(threadIdx.x==0) {
+		w_buffer[0] = atomicAdd(&restart_d,1);
+	}__syncthreads();
+	return w_buffer[0];
+}
 
 // Allocates and initializes my global memory and shared memory.
 //
@@ -93,7 +103,7 @@ template <ThreadBufferStatus Status, int TileSize> static inline __device__ int 
 	
 	if(Status == MORE_THREADS_THAN_BUFFER) {
 		for(int i = 0 ; i <= TileSize / blockDim.x; ++i ) {
-			if(w_buffer[Index] > t_val) {
+			if(w_buffer[Index] < t_val) {
 				w_buffer[Index] = t_val;
 			}
 		}__syncthreads();
@@ -138,25 +148,25 @@ template <ThreadBufferStatus Status, int TileSize> static inline __device__ int 
 	int offset = (upper + 1) / 2;
 	if( threadIdx.x + offset < upper ) {
 		w_buffer[Index] = t_val = min(t_val,w_buffer[Index + offset]);
-	}__syncthreads();
+	}
 	upper = offset;
 	
 	offset = (upper + 1) / 2;
 	if( threadIdx.x + offset < upper ) {
 		w_buffer[Index] = t_val = min(t_val,w_buffer[Index + offset]);
-	}__syncthreads();
+	}
 	upper = offset;
 	
 	offset = (upper + 1) / 2;
 	if( threadIdx.x + offset < upper ) {
 		w_buffer[Index] = t_val = min(t_val,w_buffer[Index + offset]);
-	}__syncthreads();
+	}
 	upper = offset;
 	
 	offset = (upper + 1) / 2;
 	if( threadIdx.x + offset < upper ) {
 		w_buffer[Index] = t_val = min(t_val,w_buffer[Index + offset]);
-	}__syncthreads();
+	}
 	upper = offset;
 	
 	offset = (upper + 1) / 2;
@@ -242,6 +252,7 @@ static __device__ void singleIter(Data* &pos, int* &weight, int &minchange, int 
 				float pxj0 = x_buffer[jm];
 				float pyj0 = y_buffer[jm];
 				int change = w_buffer[jm]
+				
 					+ __float2int_rn(sqrtf((pxi0 - pxj0) * (pxi0 - pxj0) + (pyi0 - pyj0) * (pyi0 - pyj0)))
 					+ __float2int_rn(sqrtf((pxi1 - pxj1) * (pxi1 - pxj1) + (pyi1 - pyj1) * (pyi1 - pyj1)));
 					
@@ -325,12 +336,12 @@ static __device__ void permute(Data* &pos, int* &weight, const int &cities) {
 //
 // @pos_d	- The position of each point in the graph.
 // @cities	- The number of vertices in the graph
-template <ThreadBufferStatus Status, int TileSize> static __global__ __launch_bounds__(1024, 2) void TwoOpt(const Data *pos_d, const int cities) {
+template <ThreadBufferStatus Status, int TileSize> static __global__ __launch_bounds__(1024, 2) void TwoOpt(const int Restarts, const Data *pos_d, const int cities) {
 	
 	Data	*pos;
 	int 	*weight;
 	int 	local_climbs = 0;
-	int mini,minj,minchange;
+	int		best_length = INT_MAX;
 	
 	if( !initMemory<TileSize>(pos_d,pos,weight,cities) ) {
 		if(threadIdx.x == 0) {
@@ -339,28 +350,40 @@ template <ThreadBufferStatus Status, int TileSize> static __global__ __launch_bo
 		return;
 	}
 	
-	permute(pos,weight,cities);
-  
-	do {
-		++local_climbs;
-    	minchange = mini = minj = 0;
-		singleIter<TileSize>(pos, weight, minchange, mini, minj, cities);
-	} while (update<Status,TileSize>(pos, weight, minchange, mini, minj, cities));
 	
+	for(int r = nextInt() ; r < Restarts; r = nextInt()) {
 	
-	w_buffer[0] = 0;
-	__syncthreads();
-	int term = 0;
-	for (int i = threadIdx.x; i < cities; i += blockDim.x) {
-		term += dist(i, i + 1);
-	}
-	atomicAdd(w_buffer,term);
-	__syncthreads();
+		int mini,minj,minchange;
+		
+		permute(pos,weight,cities);
+	  
+		do {
+			++local_climbs;
+			minchange = mini = minj = 0;
+			singleIter<TileSize>(pos, weight, minchange, mini, minj, cities);
+		} while (update<Status,TileSize>(pos, weight, minchange, mini, minj, cities));
+	
+		w_buffer[0] = 0;
+		__syncthreads();
+		int term = 0;
+		for (int i = threadIdx.x; i < cities; i += blockDim.x) {
+			term += dist(i, i + 1);
+		}
+		atomicAdd(w_buffer,term);
+		__syncthreads();
 
+		if(threadIdx.x==0) {
+			if(w_buffer[0] < best_length) {
+				best_length = w_buffer[0];
+			}
+		}
+		
+	}
+	
   if (threadIdx.x == 0) {
 	// Save data
 	atomicAdd(&climbs_d,local_climbs);
-    atomicMin(&best_d, w_buffer[0]);
+    atomicMin(&best_d, best_length);
 	
 	// Release memory
 	delete pos;
@@ -460,6 +483,16 @@ static const char* getName(const ThreadBufferStatus status) {
 }
 
 //
+//
+//
+static int getMaxBlocks(const int Threads) {
+	cudaDeviceProp props;
+	cudaGetDeviceProperties(&props,0);
+	return props.multiProcessorCount * min(16,2048/Threads);
+}
+
+
+//
 //	Run the kernel
 //
 template <int TileSize>
@@ -467,7 +500,7 @@ static float RunKernel(const int Restarts, const int Threads, const Data *Pos_d,
 	float time;
 	cudaEvent_t begin,end;
 	const int Shared_Bytes = (sizeof(int) + 2 * sizeof(float)) * TileSize;
-	const int Blocks = Restarts;
+	const int Blocks = getMaxBlocks(Threads);
 	const ThreadBufferStatus Status = (Threads > TileSize) ? MORE_THREADS_THAN_BUFFER : (Threads < TileSize) ? MORE_BUFFER_THAN_THREADS : EQUAL_SIZE;
 	
 	cudaEventCreate(&begin);
@@ -478,13 +511,13 @@ static float RunKernel(const int Restarts, const int Threads, const Data *Pos_d,
 	cudaEventRecord(begin,0);
 	switch(Status) {
 		case MORE_THREADS_THAN_BUFFER:
-			TwoOpt<MORE_THREADS_THAN_BUFFER,TileSize><<<Restarts,Threads,Shared_Bytes>>>(Pos_d,Cities);
+			TwoOpt<MORE_THREADS_THAN_BUFFER,TileSize><<<Blocks,Threads,Shared_Bytes>>>(Restarts,Pos_d,Cities);
 			break;
 		case EQUAL_SIZE:
-			TwoOpt<EQUAL_SIZE,TileSize><<<Restarts,Threads,Shared_Bytes>>>(Pos_d,Cities);
+			TwoOpt<EQUAL_SIZE,TileSize><<<Blocks,Threads,Shared_Bytes>>>(Restarts,Pos_d,Cities);
 			break;
 		case MORE_BUFFER_THAN_THREADS:
-			TwoOpt<MORE_BUFFER_THAN_THREADS,TileSize><<<Restarts,Threads,Shared_Bytes>>>(Pos_d,Cities);
+			TwoOpt<MORE_BUFFER_THAN_THREADS,TileSize><<<Blocks,Threads,Shared_Bytes>>>(Restarts,Pos_d,Cities);
 			break;
 	};
 	cudaEventRecord(end,0);
@@ -642,7 +675,7 @@ int main(int argc, char *argv[])
 		std::cout << moves * 0.000001 / time << "Gmoves/s" << std::endl;
 		std::cout << "best found tour length = " << best_d << std::endl;
 		std::cout << "Total Time : " << time / 1000.0f << "s" << std::endl;
-		std::cout << "Hours = " << hours << ", Minutes = " << minutes << ", Seconds = " << seconds << " Milliseconds = " << (int)(time) % 1000 << std::endl;
+		std::cout << "Hours = " << hours << ", Minutes = " << minutes << ", Seconds = " << seconds << ", Milliseconds = " << (int)(time) % 1000 << std::endl;
 	}
 
 	cudaDeviceReset();
