@@ -353,6 +353,7 @@ int main(int argc, char *argv[])
 	cudaEventRecord(begin,0);
     TwoOpt<<<restarts, threads, sizeof(int) * threads>>>(cities, posx_d, posy_d, glob_d);
 	cudaEventRecord(end,0);
+	cudaEventSynchronize(end);
     CudaTest("kernel launch failed");  // needed for timing
     //gettimeofday(&endtime, NULL);
 
@@ -363,11 +364,11 @@ int main(int argc, char *argv[])
     moves = 1LL * climbs * (cities - 2) * (cities - 1) / 2;
 
 	float time;
-	cudaEventSynchronize(end);
+	
 	cudaEventElapsedTime(&time,begin,end);
 	cudaEventDestroy(begin);
 	cudaEventDestroy(end);
-	printf("%f\n",time/1000);
+	printf("Total Time : %fs\n",time/1000);
 	
 	
 	

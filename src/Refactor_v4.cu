@@ -1,8 +1,22 @@
+//
+//	Copyright :
+//		Don't use this in commercial code unless you talk to me and I agree after stipulations.
+//
+// Description :
+//		Iterative Two-Opt solver.
+//
+//	Author :
+//		Name	: Jeffrey A Robinson
+//		Email	: jarobinson3@crimson.ua.edu
+//
+//
 
-#define S_DATA 1
+
 
 // C++
 #include <iostream>
+#include <string>
+
 
 // C
 #include <stdlib.h>
@@ -10,31 +24,42 @@
 #include <math.h>
 #include <limits.h>
 
+
 // CUDA
 #include <cuda.h>
 #include <curand_kernel.h>
 
+
+// Force -Wall after this point, VC only (Check https://gcc.gnu.org/onlinedocs/gcc/Diagnostic-Pragmas.html for GCC)
+#pragma warning(push,4)
+
+
 // data structures
 enum ThreadBufferStatus {MORE_THREADS_THAN_BUFFER,EQUAL_SIZE,MORE_BUFFER_THAN_THREADS};
+
 
 // Data structure used to hold position along path
 struct __align__(8) Data {
 	float x,y;
 };
 
+
+// Data-structue for shared memory
 struct S_Data {
 	int w;
 	float x,y;
 };
 
-/******************************************************************************/
-/*** 2-opt with random restarts ***********************************************/
-/******************************************************************************/
 
 // Global stats
 static __device__ __managed__ int climbs_d = 0;
 static __device__ __managed__ int best_d = INT_MAX;
 static __device__ int restart_d = 0;
+
+
+// If not 0 then use Shared Memory Structure to hold x,y and w values; otherwise, each component is held in own array.
+#define S_DATA 1
+
 
 // Buffer space
 #if S_DATA
@@ -46,7 +71,16 @@ __shared__ float *y_buffer;
 __shared__ int   *w_buffer;
 #endif
 
-// Wrappers for shared memory buffer(s)
+
+
+// Wrappers for the shared memory buffer(s)
+static __device__ inline void sAtomicMinW(const int &index, const int &v) {
+#if S_DATA
+	atomicMin(&buffer[index].w,v);
+#else
+	atomicMin(w_buffer+index,v);
+#endif
+}
 static __device__ inline void sX(const int &index, const float &v) {
 #if S_DATA
 	buffer[index].x = v;
@@ -90,8 +124,11 @@ static __device__ inline int   gW(const int &index) {
 #endif
 }
 
+
+
 //
-// Give two points returns the distance between them
+// Description :
+// 	Give two points returns the distance between them
 //
 // @x1	- X value of the first point
 // @x1	- Y value of the first point
@@ -106,11 +143,17 @@ dist(float &x1, float &y1, float &x2, float &y2) {
 	return __float2int_rn(sqrtf(x*x + y));
 }
 
+
 //
-// Returns a unique integer value with the intial value being 0
+// POSSIBLE IDEA :
+// 		We could reduce the atomicAdd by letting each thread do their own work.
+//		But when they run out then try to grab other blocks remaining work.
+//
+// Description :
+// 		Returns a unique integer value with the intial value being 0
 //
 // @return  - Returns the next unique integer
-static __device__ int 
+static __device__ inline int 
 nextInt() {
 	if(threadIdx.x==0) {
 		sW(0,atomicAdd(&restart_d,1));
@@ -118,7 +161,10 @@ nextInt() {
 	return gW(0);
 }
 
-// Allocates and initializes my global memory and shared memory.
+
+//
+// Description :
+//		Allocates and initializes my global memory and shared memory.
 //
 //	@pos	- An array that need to be initialized and will hold our path points
 //	@weight	- An array that need to be initialized and will hold our edge weights
@@ -162,8 +208,11 @@ initMemory(const Data* &pos_d, Data* &pos, int * &weight, const int &cities) {
 	return true;
 }
 
+
+
 //
-// Each thread gives some integer value, then the "best" of them is returned.
+// Description :
+// 		Each thread gives some integer value, then the "best" of them is returned.
 //
 // @t_val  - The number that the thread submits as a candidate for the maximum value
 // @cities - The number of cities.
@@ -179,7 +228,8 @@ maximum(int t_val, const int &cities) {
 		sW(Index,t_val);
 		__syncthreads();
 		for(int i = -1 ; i <= blockDim.x/TileSize; ++i ) {
-			sW(Index,t_val = min(t_val,gW(Index)));
+			sAtomicMinW(Index,t_val);
+			//sW(Index,t_val = min(t_val,gW(Index)));
 		}__syncthreads();
 	}else {
 		sW(threadIdx.x,t_val);
@@ -233,9 +283,13 @@ maximum(int t_val, const int &cities) {
 	return gW(0);
 }
 
+
+
+
 //
-//	After we find the best four position to reconnect with all we need to
-//	reverse the path between them.
+// Description :
+//		After we find the best four position to reconnect with all we need to
+//		reverse the path between them.
 //
 //	@start 	 - The first position in the sub-path we have to swap with the end
 // 	@end	 - The last position in the path we have to swap with the start
@@ -260,8 +314,12 @@ reverse(int start, int end, Data* &pos, int* &weight) {
 	}__syncthreads();
 }
 
+
+
 //
-// Perform a single iteration of Two-Opt
+// Description :
+//		Perform a single iteration of Two-Opt.
+//
 // @pos			- The current Hamiltonian path
 // @weight		- The current weight of our edges along the path
 // @minchange 	- The current best change we can make
@@ -340,9 +398,12 @@ singleIter(Data* &pos, int* &weight, int &minchange, int &mini, int &minj, const
 	}
 }
 
+
+
 //
-// Perform the swaps to the edges i and j to decrease the total length of our
-// path and update the weight and pos arrays appropriately.
+// Description :
+//		Perform the swaps to the edges i and j to decrease the total length of our
+//		path and update the weight and pos arrays appropriately.
 //
 // @pos			- The current Hamiltonian path
 // @weight		- The current weight of our edges along the path
@@ -354,14 +415,14 @@ template <int Reductions, ThreadBufferStatus Status, int TileSize>
 static __device__ bool
 update(Data* &pos, int* &weight, int &minchange, int &mini, int &minj, const int &cities) {
 
-	maximum<Reductions,Status,TileSize>(minchange, cities);
-	if(gW(0) >= 0) return false;
-
+	__shared__ int winner;winner = blockDim.x;
+	if( maximum<Reductions,Status,TileSize>(minchange, cities) >= 0) return false;
+	
 	if (minchange == gW(0)) {
-		sW(1,threadIdx.x);
+		atomicMin(&winner,threadIdx.x);
 	}__syncthreads();
 
-	if(gW(1) == threadIdx.x) {
+	if(winner == threadIdx.x) {
 		sW(2,mini);
 		sW(3,minj);
 	}__syncthreads();
@@ -379,13 +440,18 @@ update(Data* &pos, int* &weight, int &minchange, int &mini, int &minj, const int
 	return true;
 }
 
+
+
 //
-// Given a path we randomly permute it into a new new path and then initialize the weights of the path.
+// Description :
+//		Given a path we randomly permute it into a new new path and then initialize 
+//		the weights of the path.
 //
 // @pos			- The current Hamiltonian path
 // @weight		- The current weight of our edges along the path
 // @cities		- The number of cities along the path (excluding the end point)
-static __device__ void permute(Data* &pos, int* &weight, const int &cities) {
+static __device__ inline void
+permute(Data* &pos, int* &weight, const int &cities) {
 	if (threadIdx.x == 0) {  // serial permutation
 		curandState rndstate;
 		curand_init(blockIdx.x, 0, 0, &rndstate);
@@ -405,8 +471,11 @@ static __device__ void permute(Data* &pos, int* &weight, const int &cities) {
 }
 
 
+
 //
-// Perform iterative two-opt until there can be no more swaps to reduce the path length.
+// Description :
+//		Perform iterative two-opt until there can be no more swaps to reduce
+//		the path length.
 //
 // @pos_d	- The position of each point in the graph.
 // @cities	- The number of vertices in the graph
@@ -468,13 +537,16 @@ TwoOpt(const int Restarts, const Data *pos_d, const int cities) {
 }
 
 
+
 //
-// Checks to see if an error occured with CUDA and if so prints out the message passed and the CUDA
+// Description :
+//		Checks to see if an error occured with CUDA and if so prints out the message 
+//		passed and the CUDA
 // error then quits the application.
 //
 // @msg	- Message to print out if error occurs
 static void
-CudaTest(char *msg) {
+CudaTest(const char *msg) {
   cudaError_t e;
   cudaThreadSynchronize();
   if (cudaSuccess != (e = cudaGetLastError())) {
@@ -485,12 +557,18 @@ CudaTest(char *msg) {
   }
 }
 
+
+
 // Terrible (TODO: Turn into functions)
 #define mallocOnGPU(addr, size) if (cudaSuccess != cudaMalloc((void **)&addr, size)) fprintf(stderr, "could not allocate GPU memory\n");  CudaTest("couldn't allocate GPU memory");
 #define copyToGPU(to, from, size) if (cudaSuccess != cudaMemcpy(to, from, size, cudaMemcpyHostToDevice)) fprintf(stderr, "copying of data to device failed\n");  CudaTest("data copy to device failed");
 
+
+
 //
-// Read TPS lib files into GPU memory.  ATT and CEIL_2D edge weight types are not supported
+// Description :
+// 		Read TPS lib files into GPU memory.  ATT and CEIL_2D edge weight types are 
+//		not supported
 //
 // @fname	- The name of the file to read the TSP data from
 // @pos_d	- Pointer to the pointer that will hold data on GPU
@@ -549,24 +627,33 @@ readInput(const char *fname, Data **pos_d) {
   return cities;
 }
 
+
+
 //
-// Given an enum value return it's string representation
+// Description :
+// 		Given an enum value return it's string representation
 //
-static const char*
+// @status - The enum value to translate
+//
+// @return - The enums string representation in the source code
+static const std::string
 getName(const ThreadBufferStatus status) {
 	switch(status) {
 		case MORE_THREADS_THAN_BUFFER:
-			return "MORE_THREADS_THAN_BUFFER";
+			return std::string("MORE_THREADS_THAN_BUFFER");
 		case EQUAL_SIZE:
-			return "EQUAL_SIZE";
+			return std::string("EQUAL_SIZE");
 		case MORE_BUFFER_THAN_THREADS:
-			return "MORE_BUFFER_THAN_THREADS";
+			return std::string("MORE_BUFFER_THAN_THREADS");
 	};
-	return "error";
+	return std::string("enum value not found.");
 }
 
+
+
 //
-// Given an integer returns the next multiple of 32 greater than or equal to it.
+// Description :
+// 		Given an integer returns the next multiple of 32 greater than or equal to it.
 //
 // @in 		- The integer to round to next multiple of 32
 //
@@ -576,8 +663,12 @@ next32(int in) {
 	return ((in + 31) / 32 ) * 32;
 }
 
+
+
 //
-// How many reductions do we need to perform in order to make sure we have found our min/max/etc
+// Description :
+//		How many reductions do we need to perform in order to make sure we have found
+//		our min/max/etc
 //
 // @return returns the number of reductions needed to propogate any value
 static int
@@ -591,58 +682,82 @@ computeReductions(const int Cities, const int Threads, const int TileSize) {
 	return 5;
 }
 
+
+
 //
+// Description :
 // Calculates the maximum number of resident blocks that the card can hold
 //
-// @Threads - Number of threads that each block will have
+// @Threads 		- Number of threads that each block will have
+// @Shared_Bytes	- The amount of bytes each block will allocate
 //
-// @return - Returns the number of blocks the card can have resident
+// @return 			- Returns the number of blocks the card can have resident
 static int
-getMaxBlocks(const int Threads) {
+getMaxBlocks(const int Shared_Bytes, const int Threads) {
 	cudaDeviceProp props;
 	cudaGetDeviceProperties(&props,0);
 
 	if(props.major < 3) {
-		return props.multiProcessorCount * min(8,(int)(2048/Threads));
+		const int Max_Shared = 16384;
+		const int Block_Shared_Limit = (Max_Shared / Shared_Bytes);
+		return props.multiProcessorCount * min(8,min(Block_Shared_Limit,(int)(2048/Threads)));
 	}else if(props.major < 5) {
-		return props.multiProcessorCount * min(16,(int)(2048/Threads));
+		const int Max_Shared = 32768;
+		const int Block_Shared_Limit = (Max_Shared / Shared_Bytes);
+		return props.multiProcessorCount * min(16,min(Block_Shared_Limit,(int)(2048/Threads)));
 	}else {
-		return props.multiProcessorCount * min(32,(int)(2048/Threads));
+		const int Max_Shared = 65536;
+		const int Block_Shared_Limit = (Max_Shared / Shared_Bytes);
+		return props.multiProcessorCount * min(32,min(Block_Shared_Limit,(int)(2048/Threads)));
 	}
 }
 
+
+
+//
+// private : Handle ThreadBufferStatus kernel selection
+//
 template <int Reductions,int TileSize>
 static float
-Kernel(const ThreadBufferStatus Status, const int Restarts, const int Blocks, const int Threads, const Data *Pos_d, const int Cities,const int Shared_Bytes) {
+_wrapStatus(const int Restarts, const int Threads, const Data *Pos_d, const int Cities) {
+
+#if S_DATA
+	const int Shared_Bytes = sizeof(S_Data) * TileSize;
+#else
+	const int Shared_Bytes = (sizeof(int) + 2 * sizeof(float)) * TileSize;
+#endif
+	const int Blocks = min(Restarts,getMaxBlocks(Shared_Bytes,Threads));
+	const ThreadBufferStatus Status = (Threads > TileSize) ? MORE_THREADS_THAN_BUFFER : (Threads < TileSize) ? MORE_BUFFER_THAN_THREADS : EQUAL_SIZE;
+	float time;
+
+	// Output runtime configuration
 	std::cout << "Blocks = " << Blocks << ", Threads  = " << Threads << ", TileSize = " << TileSize << ", Status = " << getName(Status) << ", Reductions = " << Reductions << ", Shared Bytes = " << Shared_Bytes << std::endl;
 
-
-	float time;
 	cudaEvent_t begin,end;
 	cudaEventCreate(&begin);
 	cudaEventCreate(&end);
-
-
 
 	switch(Status) {
 		case MORE_THREADS_THAN_BUFFER:
 			cudaEventRecord(begin,0);
 			TwoOpt<Reductions,MORE_THREADS_THAN_BUFFER,TileSize><<<Blocks,Threads,Shared_Bytes>>>(Restarts,Pos_d,Cities);
 			cudaEventRecord(end,0);
+			cudaEventSynchronize(end);
 			break;
 		case EQUAL_SIZE:
 			cudaEventRecord(begin,0);
 			TwoOpt<Reductions,EQUAL_SIZE,TileSize><<<Blocks,Threads,Shared_Bytes>>>(Restarts,Pos_d,Cities);
 			cudaEventRecord(end,0);
+			cudaEventSynchronize(end);
 			break;
 		case MORE_BUFFER_THAN_THREADS:
 			cudaEventRecord(begin,0);
 			TwoOpt<Reductions,MORE_BUFFER_THAN_THREADS,TileSize><<<Blocks,Threads,Shared_Bytes>>>(Restarts,Pos_d,Cities);
 			cudaEventRecord(end,0);
+			cudaEventSynchronize(end);
 			break;
 	};
-
-	cudaEventSynchronize(end);
+	
 	cudaEventElapsedTime(&time,begin,end);
 
 	cudaEventDestroy(begin);
@@ -651,37 +766,129 @@ Kernel(const ThreadBufferStatus Status, const int Restarts, const int Blocks, co
 	return time;
 }
 
+
+
 //
-//	Run the kernel
+// private : Handle Reduction kernel selection
 //
 template <int TileSize>
 static float
-RunKernel(const int Restarts, const int Threads, const Data *Pos_d, const int Cities) {
-
-	const int Shared_Bytes = sizeof(S_Data) * TileSize;
-	const int Blocks = min(Restarts,getMaxBlocks(Threads));
-	const ThreadBufferStatus Status = (Threads > TileSize) ? MORE_THREADS_THAN_BUFFER : (Threads < TileSize) ? MORE_BUFFER_THAN_THREADS : EQUAL_SIZE;
+_wrapReduction(const int Restarts, const int Threads, const Data *Pos, const int Cities) {
 	const int Reductions = computeReductions(Cities,Threads,TileSize);
-
 	switch(Reductions) {
 		case 10:
-			return Kernel<10,TileSize>(Status, Restarts, Blocks, Threads, Pos_d, Cities, Shared_Bytes);
+			return _wrapStatus<10,TileSize>(Restarts, Threads, Pos, Cities);
 		case 9:
-			return Kernel<9,TileSize>(Status, Restarts, Blocks, Threads, Pos_d, Cities, Shared_Bytes);
+			return _wrapStatus<9,TileSize>(Restarts, Threads, Pos, Cities);
 		case 8:
-			return Kernel<8,TileSize>(Status, Restarts, Blocks, Threads, Pos_d, Cities, Shared_Bytes);
+			return _wrapStatus<8,TileSize>(Restarts, Threads, Pos, Cities);
 		case 7:
-			return Kernel<7,TileSize>(Status, Restarts, Blocks, Threads, Pos_d, Cities, Shared_Bytes);
+			return _wrapStatus<7,TileSize>(Restarts, Threads, Pos, Cities);
 		case 6:
-			return Kernel<6,TileSize>(Status, Restarts, Blocks, Threads, Pos_d, Cities, Shared_Bytes);
+			return _wrapStatus<6,TileSize>(Restarts, Threads, Pos, Cities);
 		default:
-			return Kernel<5,TileSize>(Status, Restarts, Blocks, Threads, Pos_d, Cities, Shared_Bytes);
+			return _wrapStatus<5,TileSize>(Restarts, Threads, Pos, Cities);
 	}
 }
 
+
+
 //
-//	Main entry point to program.
+// Description :
+//		Given these parameters we construct and start a CUDA kernel.
 //
+// @Cities		- Number of cities or nodes in the graph
+// @Pos			- Position data of graph nodes.
+// @Restarts	- How many different random permutations of input city should be try
+// @Threads		- The number of threads each block should have
+// @TileSize	- The shared buffer size for our sliding tile.
+//
+// @return		- Returns the duration of the kernel in milliseconds.
+static float
+RunKernel(const int Cities, const Data *Pos, const int Restarts, const int Threads, const int TileSize) {
+	switch(TileSize) {
+		case 32:
+			return _wrapReduction<32>(Restarts,Threads,Pos,Cities);
+		case 64:
+			return _wrapReduction<64>(Restarts,Threads,Pos,Cities);
+		case 96:
+			return _wrapReduction<96>(Restarts,Threads,Pos,Cities);
+		case 128:
+			return _wrapReduction<128>(Restarts,Threads,Pos,Cities);
+		case 160:
+			return _wrapReduction<160>(Restarts,Threads,Pos,Cities);
+		case 192:
+			return _wrapReduction<192>(Restarts,Threads,Pos,Cities);
+		case 224:
+			return _wrapReduction<224>(Restarts,Threads,Pos,Cities);
+		case 256:
+			return _wrapReduction<256>(Restarts,Threads,Pos,Cities);
+		case 288:
+			return _wrapReduction<288>(Restarts,Threads,Pos,Cities);
+		case 320:
+			return _wrapReduction<320>(Restarts,Threads,Pos,Cities);
+		case 352:
+			return _wrapReduction<352>(Restarts,Threads,Pos,Cities);
+		case 384:
+			return _wrapReduction<384>(Restarts,Threads,Pos,Cities);
+		case 416:
+			return _wrapReduction<416>(Restarts,Threads,Pos,Cities);
+		case 448:
+			return _wrapReduction<448>(Restarts,Threads,Pos,Cities);
+		case 480:
+			return _wrapReduction<480>(Restarts,Threads,Pos,Cities);
+		case 512:
+			return _wrapReduction<512>(Restarts,Threads,Pos,Cities);
+		case 544:
+			return _wrapReduction<544>(Restarts,Threads,Pos,Cities);
+		case 576:
+			return _wrapReduction<576>(Restarts,Threads,Pos,Cities);
+		case 608:
+			return _wrapReduction<608>(Restarts,Threads,Pos,Cities);
+		case 640:
+			return _wrapReduction<640>(Restarts,Threads,Pos,Cities);
+		case 672:
+			return _wrapReduction<672>(Restarts,Threads,Pos,Cities);
+		case 704:
+			return _wrapReduction<704>(Restarts,Threads,Pos,Cities);
+		case 736:
+			return _wrapReduction<736>(Restarts,Threads,Pos,Cities);
+		case 768:
+			return _wrapReduction<768>(Restarts,Threads,Pos,Cities);
+		case 800:
+			return _wrapReduction<800>(Restarts,Threads,Pos,Cities);
+		case 832:
+			return _wrapReduction<832>(Restarts,Threads,Pos,Cities);
+		case 864:
+			return _wrapReduction<864>(Restarts,Threads,Pos,Cities);
+		case 896:
+			return _wrapReduction<896>(Restarts,Threads,Pos,Cities);
+		case 928:
+			return _wrapReduction<928>(Restarts,Threads,Pos,Cities);
+		case 960:
+			return _wrapReduction<960>(Restarts,Threads,Pos,Cities);
+		case 992:
+			return _wrapReduction<992>(Restarts,Threads,Pos,Cities);
+		case 1024:
+			return _wrapReduction<1024>(Restarts,Threads,Pos,Cities);
+		default:
+			std::cout << "Invalid TileSize = " << TileSize << std::endl;
+			exit(-1);
+	};
+	return -1;
+}
+
+
+
+//
+// Description :
+//		Main entry point to our iterative Two-Opt solver.  
+//		Options are ./<name> problem_file restarts <threads> <buffer_size>
+//
+// @argc	- Number of command line parameters (including program name)
+// @argv	- Holds command line arguments
+//
+// @return	- Returns 0 if success, otherwise failure.
 int
 main(int argc, char *argv[]) {
 	printf("2-opt TSP CUDA GPU code v2.1 [Kepler]\n");
@@ -699,114 +906,11 @@ main(int argc, char *argv[]) {
 	const int Threads = min(1024,(argc >= 4) ? next32(atoi(argv[3])) : next32(Cities));
 	const int TileSize = min(1024,(argc >= 5) ? next32(atoi(argv[4])) : Threads);
 
-	float time;
+	const float time = RunKernel(Cities,pos_d,Restarts,Threads,TileSize);
 
-	switch(TileSize) {
-		case 32:
-			time = RunKernel<32>(Restarts,Threads,pos_d,Cities);
-			break;
-		case 64:
-			time = RunKernel<64>(Restarts,Threads,pos_d,Cities);
-			break;
-		case 96:
-			time = RunKernel<96>(Restarts,Threads,pos_d,Cities);
-			break;
-		case 128:
-			time = RunKernel<128>(Restarts,Threads,pos_d,Cities);
-			break;
-		case 160:
-			time = RunKernel<160>(Restarts,Threads,pos_d,Cities);
-			break;
-		case 192:
-			time = RunKernel<192>(Restarts,Threads,pos_d,Cities);
-			break;
-		case 224:
-			time = RunKernel<224>(Restarts,Threads,pos_d,Cities);
-			break;
-		case 256:
-			time = RunKernel<256>(Restarts,Threads,pos_d,Cities);
-			break;
-		case 288:
-			time = RunKernel<288>(Restarts,Threads,pos_d,Cities);
-			break;
-		case 320:
-			time = RunKernel<320>(Restarts,Threads,pos_d,Cities);
-			break;
-		case 352:
-			time = RunKernel<352>(Restarts,Threads,pos_d,Cities);
-			break;
-		case 384:
-			time = RunKernel<384>(Restarts,Threads,pos_d,Cities);
-			break;
-		case 416:
-			time = RunKernel<416>(Restarts,Threads,pos_d,Cities);
-			break;
-		case 448:
-			time = RunKernel<448>(Restarts,Threads,pos_d,Cities);
-			break;
-		case 480:
-			time = RunKernel<480>(Restarts,Threads,pos_d,Cities);
-			break;
-		case 512:
-			time = RunKernel<512>(Restarts,Threads,pos_d,Cities);
-			break;
-		case 544:
-			time = RunKernel<544>(Restarts,Threads,pos_d,Cities);
-			break;
-		case 576:
-			time = RunKernel<576>(Restarts,Threads,pos_d,Cities);
-			break;
-		case 608:
-			time = RunKernel<608>(Restarts,Threads,pos_d,Cities);
-			break;
-		case 640:
-			time = RunKernel<640>(Restarts,Threads,pos_d,Cities);
-			break;
-		case 672:
-			time = RunKernel<672>(Restarts,Threads,pos_d,Cities);
-			break;
-		case 704:
-			time = RunKernel<704>(Restarts,Threads,pos_d,Cities);
-			break;
-		case 736:
-			time = RunKernel<736>(Restarts,Threads,pos_d,Cities);
-			break;
-		case 768:
-			time = RunKernel<768>(Restarts,Threads,pos_d,Cities);
-			break;
-		case 800:
-			time = RunKernel<800>(Restarts,Threads,pos_d,Cities);
-			break;
-		case 832:
-			time = RunKernel<832>(Restarts,Threads,pos_d,Cities);
-			break;
-		case 864:
-			time = RunKernel<864>(Restarts,Threads,pos_d,Cities);
-			break;
-		case 896:
-			time = RunKernel<896>(Restarts,Threads,pos_d,Cities);
-			break;
-		case 928:
-			time = RunKernel<928>(Restarts,Threads,pos_d,Cities);
-			break;
-		case 960:
-			time = RunKernel<960>(Restarts,Threads,pos_d,Cities);
-			break;
-		case 992:
-			time = RunKernel<992>(Restarts,Threads,pos_d,Cities);
-			break;
-		case 1024:
-			time = RunKernel<1024>(Restarts,Threads,pos_d,Cities);
-			break;
-		default:
-			std::cout << "Error : " << TileSize << std::endl;
-	};
-	CudaTest("kernel launch failed");  // needed for timing
-
-	int hours = time / (3600.0f * 1000.0f);
+	int hours = (int)(time / (3600.0f * 1000.0f));
 	int seconds = (int)(time/1000) % 60;
 	int minutes = (int)(time/1000) / 60;
-
 
 	long long moves = 1LL * climbs_d * (Cities - 2) * (Cities - 1) / 2;
 
@@ -814,7 +918,6 @@ main(int argc, char *argv[]) {
 	std::cout << "best found tour length = " << best_d << std::endl;
 	std::cout << "Total Time : " << time / 1000.0f << "s" << std::endl;
 	std::cout << "Hours = " << hours << ", Minutes = " << minutes << ", Seconds = " << seconds << ", Milliseconds = " << (int)(time) % 1000 << std::endl;
-
 
 	cudaDeviceReset();
 	cudaFree(pos_d);

@@ -1,6 +1,7 @@
 
 // C++
 #include <iostream>
+#include <string>
 
 // C
 #include <stdlib.h>
@@ -11,6 +12,9 @@
 // CUDA
 #include <cuda.h>
 #include <curand_kernel.h>
+
+// Force -Wall after this point, VC only (Check https://gcc.gnu.org/onlinedocs/gcc/Diagnostic-Pragmas.html for GCC)
+#pragma warning(push,4)
 
 /******************************************************************************/
 /*** 2-opt with random restarts ***********************************************/
@@ -32,7 +36,7 @@ __shared__ int   *w_buffer;
 enum ThreadBufferStatus {MORE_THREADS_THAN_BUFFER,EQUAL_SIZE,MORE_BUFFER_THAN_THREADS};
 
 // Data structure used to hold position along path
-struct __align__(16) Data {
+struct __align__(8) Data {
 	float x,y;
 };
 
@@ -44,7 +48,9 @@ struct __align__(16) Data {
 //	@cities	- The amount of points in our graph
 //
 //	@return	- Returns true if initialization was successful, false otherwise.
-template <int TileSize> static inline __device__ bool initMemory(const Data* &pos_d, Data* &pos, int * &weight, const int &cities) {
+template <int TileSize>
+static inline __device__ bool 
+initMemory(const Data* &pos_d, Data* &pos, int * &weight, const int &cities) {
 	__shared__ Data *d;
 	// Allocate my global memory
 	if(threadIdx.x == 0 ) {
@@ -84,7 +90,9 @@ template <int TileSize> static inline __device__ bool initMemory(const Data* &po
 // @cities - The number of cities.
 //
 // @return - The maximum value of t_val seen from all threads
-template <ThreadBufferStatus Status, int TileSize> static inline __device__ int maximum(int t_val, const int &cities) {
+template <ThreadBufferStatus Status, int TileSize>
+static inline __device__ int 
+maximum(int t_val, const int &cities) {
 	
 	int upper = min(blockDim.x,min(TileSize,cities));
 	const int Index = (Status == MORE_THREADS_THAN_BUFFER)?(threadIdx.x%TileSize):threadIdx.x;
@@ -176,7 +184,8 @@ template <ThreadBufferStatus Status, int TileSize> static inline __device__ int 
 // 	@end	 - The last position in the path we have to swap with the start
 //	@pos	 - The positions in our path
 //	@weights - The edge weights between points
-static inline __device__ void reverse(int start, int end, Data* &pos, int* &weight) {
+static inline __device__ void 
+reverse(int start, int end, Data* &pos, int* &weight) {
 	while(start<end) {
 	
 		int   w = weight[start];
@@ -203,7 +212,8 @@ static inline __device__ void reverse(int start, int end, Data* &pos, int* &weig
 // @minj		- The jth city in the path that is part of the swap
 // @cities		- The number of cities along the path (excluding the end point)
 template <int TileSize>
-static __device__ void singleIter(Data* &pos, int* &weight, int &minchange, int &mini, int &minj, const int &cities) {
+static __device__ void 
+singleIter(Data* &pos, int* &weight, int &minchange, int &mini, int &minj, const int &cities) {
 	
 
 	for (int ii = 0; ii < cities - 2; ii += blockDim.x) {
@@ -272,7 +282,9 @@ static __device__ void singleIter(Data* &pos, int* &weight, int &minchange, int 
 // @mini		- The ith city in the path that is part of the swap
 // @minj		- The jth city in the path that is part of the swap
 // @cities		- The number of cities along the path (excluding the end point)
-template <ThreadBufferStatus Status, int TileSize> static __device__ bool update(Data* &pos, int* &weight, int &minchange, int &mini, int &minj, const int &cities) {
+template <ThreadBufferStatus Status, int TileSize>
+static __device__ bool 
+update(Data* &pos, int* &weight, int &minchange, int &mini, int &minj, const int &cities) {
 
 	maximum<Status,TileSize>(minchange, cities);
 	if(w_buffer[0] >= 0) return false;
@@ -300,7 +312,8 @@ template <ThreadBufferStatus Status, int TileSize> static __device__ bool update
 // @pos			- The current Hamiltonian path 
 // @weight		- The current weight of our edges along the path
 // @cities		- The number of cities along the path (excluding the end point)
-static __device__ void permute(Data* &pos, int* &weight, const int &cities) {
+static __device__ inline void 
+permute(Data* &pos, int* &weight, const int &cities) {
 	if (threadIdx.x == 0) {  // serial permutation
 		curandState rndstate;
 		curand_init(blockIdx.x, 0, 0, &rndstate);
@@ -325,7 +338,9 @@ static __device__ void permute(Data* &pos, int* &weight, const int &cities) {
 //
 // @pos_d	- The position of each point in the graph.
 // @cities	- The number of vertices in the graph
-template <ThreadBufferStatus Status, int TileSize> static __global__ __launch_bounds__(1024, 2) void TwoOpt(const Data *pos_d, const int cities) {
+template <ThreadBufferStatus Status, int TileSize>
+static __global__ __launch_bounds__(1024, 2) void 
+TwoOpt(const Data *pos_d, const int cities) {
 	
 	Data	*pos;
 	int 	*weight;
@@ -374,7 +389,8 @@ template <ThreadBufferStatus Status, int TileSize> static __global__ __launch_bo
 // error then quits the application.
 //
 // @msg	- Message to print out if error occurs
-static void CudaTest(char *msg) {
+static void 
+CudaTest(char *msg) {
   cudaError_t e;
   cudaThreadSynchronize();
   if (cudaSuccess != (e = cudaGetLastError())) {
@@ -396,7 +412,8 @@ static void CudaTest(char *msg) {
 //			  and is modified here to be the address on the GPU
 //
 // @return	- Returns the number of cities found
-static int readInput(const char *fname, Data **pos_d) {
+static int 
+readInput(const char *fname, Data **pos_d) {
   int ch, cnt, in1, cities;
   float in2, in3;
   FILE *f;
@@ -447,33 +464,43 @@ static int readInput(const char *fname, Data **pos_d) {
   return cities;
 }
 
-static const char* getName(const ThreadBufferStatus status) {
+
+//
+// Given an enum value return it's string representation
+//
+// @status - The enum value to translate
+//
+// @return - The enums string representation in the source code
+static const std::string
+getName(const ThreadBufferStatus status) {
 	switch(status) {
 		case MORE_THREADS_THAN_BUFFER:
-			return "MORE_THREADS_THAN_BUFFER";
+			return std::string("MORE_THREADS_THAN_BUFFER");
 		case EQUAL_SIZE:
-			return "EQUAL_SIZE";
+			return std::string("EQUAL_SIZE");
 		case MORE_BUFFER_THAN_THREADS:
-			return "MORE_BUFFER_THAN_THREADS";
+			return std::string("MORE_BUFFER_THAN_THREADS");
 	};
-	return "error";
+	return std::string("enum value not found.");
 }
+
 
 //
 //	Run the kernel
 //
 template <int TileSize>
-static float RunKernel(const int Restarts, const int Threads, const Data *Pos_d, const int Cities) {
+static float 
+RunKernel(const int Restarts, const int Threads, const Data *Pos_d, const int Cities) {
 	float time;
 	cudaEvent_t begin,end;
-	const int Shared_Bytes = (sizeof(int) + 2 * sizeof(float)) * TileSize;
+	const int Shared_Bytes = (sizeof(int) + 2*sizeof(float)) * TileSize;
 	const int Blocks = Restarts;
 	const ThreadBufferStatus Status = (Threads > TileSize) ? MORE_THREADS_THAN_BUFFER : (Threads < TileSize) ? MORE_BUFFER_THAN_THREADS : EQUAL_SIZE;
 	
 	cudaEventCreate(&begin);
 	cudaEventCreate(&end);
 	
-	std::cout << "Blocks = " << Blocks << ", Threads  = " << Threads << ", TileSize = " << TileSize << ", Status = " << getName(Status) << std::endl;
+	std::cout << "Blocks = " << Blocks << ", Threads  = " << Threads << ", TileSize = " << TileSize << ", Status = " << getName(Status) << ", Shared Bytes = " << Shared_Bytes << std::endl;
 	
 	cudaEventRecord(begin,0);
 	switch(Status) {
@@ -498,15 +525,22 @@ static float RunKernel(const int Restarts, const int Threads, const Data *Pos_d,
 	return time;
 }
 
-static int next32(int in) {
+//
+// Given an integer returns the next multiple of 32 greater than or equal to it.
+//
+// @in 		- The integer to round to next multiple of 32
+//
+// @return 	- Returns the next multiple of 32 that is greater than or equals to in
+static int 
+next32(int in) {
 	return ((in + 31) >> 5) << 5;
 }
 
 //
 //	Main entry point to program.
 //
-int main(int argc, char *argv[])
-{
+int 
+main(int argc, char *argv[]) {
 	printf("2-opt TSP CUDA GPU code v2.1 [Kepler]\n");
 	printf("Copyright (c) 2014, Texas State University. All rights reserved.\n");
 
@@ -632,7 +666,7 @@ int main(int argc, char *argv[])
 		};
 		CudaTest("kernel launch failed");  // needed for timing
 		
-		int hours = time / (3600.0f * 1000.0f);
+		int hours = (int)(time / (3600.0f * 1000.0f));
 		int seconds = (int)(time/1000) % 60;
 		int minutes = (int)(time/1000) / 60;
 		
@@ -649,3 +683,4 @@ int main(int argc, char *argv[])
 	cudaFree(pos_d);
 	return 0;
 }
+
