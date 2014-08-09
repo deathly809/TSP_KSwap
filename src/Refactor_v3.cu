@@ -302,11 +302,18 @@ update(Data* &pos, int* &weight, int &minchange, int &mini, int &minj, const int
 	if(w_buffer[0] >= 0) return false;
 	
 	if (minchange == w_buffer[0]) {
-		w_buffer[1] = ((mini) << 16) + minj;  // non-deterministic winner
+		//if(atomicCAS(w_buffer,minchange,1) == minchange) {
+		{
+			//w_buffer[1] = mini;
+			//w_buffer[2] = minj;
+			w_buffer[1] = ((mini) << 16) + minj;  // non-deterministic winner
+		}
 	}__syncthreads();
 
 	mini = w_buffer[1] >> 16;
-	minj = w_buffer[1] & 0xffff;
+	minj = w_buffer[1] & 0xFFFF;
+	//mini = w_buffer[1];
+	//minj = w_buffer[2];
 	
 	// Fix path and weights
 	reverse(mini+1+threadIdx.x,minj-threadIdx.x,pos,weight);

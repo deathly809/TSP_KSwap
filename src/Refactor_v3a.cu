@@ -44,12 +44,17 @@ struct __align__(8) Data {
 };
 
 
+// If not 0 then use Shared Memory Structure to hold x,y and w values; otherwise, each component is held in own array.
+#define S_DATA 0
+
+#if S_DATA == 1
 // Data-structue for shared memory
-struct S_Data {
+struct __align__(8) S_Data {
 	int w;
 	float x,y;
 };
 
+#endif
 
 // Global stats
 static __device__ __managed__ int climbs_d = 0;
@@ -57,8 +62,6 @@ static __device__ __managed__ int best_d = INT_MAX;
 static __device__ int restart_d = 0;
 
 
-// If not 0 then use Shared Memory Structure to hold x,y and w values; otherwise, each component is held in own array.
-#define S_DATA 1
 
 
 // Buffer space
@@ -81,49 +84,25 @@ static __device__ inline void sAtomicMinW(const int &index, const int &v) {
 	atomicMin(w_buffer+index,v);
 #endif
 }
-static __device__ inline void sX(const int &index, const float &v) {
-#if S_DATA
-	buffer[index].x = v;
-#else
-	x_buffer[index] = v;
-#endif
-}
-static __device__ inline void sY(const int &index, const float &v) {
-#if S_DATA
-	buffer[index].y = v;
-#else
-	y_buffer[index] = v ;
-#endif
-}
-static __device__ inline void sW(const int &index, const float &v) {
-#if S_DATA
-	buffer[index].w = v;
-#else
-	w_buffer[index] = v;
-#endif
-}
-static __device__ inline float gX(const int &index) {
-#if S_DATA
-	return buffer[index].x;
-#else
-	return x_buffer[index];
-#endif
-}
-static __device__ inline float gY(const int &index) {
-#if S_DATA
-	return buffer[index].y;
-#else
-	return y_buffer[index];
-#endif
-}
-static __device__ inline int   gW(const int &index) {
-#if S_DATA
-	return buffer[index].w;
-#else
-	return w_buffer[index];
-#endif
-}
 
+#if S_DATA
+	#define sX(index,v) buffer[index].x = v
+	#define sY(index,v) buffer[index].y = v
+	#define sW(index,v) buffer[index].w = v
+	
+	#define gX(index) buffer[index].x
+	#define gY(index) buffer[index].y
+	#define gW(index) buffer[index].w
+	
+#else					
+	#define sX(index,v) x_buffer[index] = v
+	#define sY(index,v) y_buffer[index] = v
+	#define sW(index,v) w_buffer[index] = v
+	
+	#define gX(index) x_buffer[index]
+	#define gY(index) y_buffer[index]
+	#define gW(index) w_buffer[index]
+#endif
 
 
 //
@@ -237,67 +216,57 @@ maximum(int t_val, const int cities) {
 	
 	if (TileSize > 512) {
 		int offset = (upper + 1) / 2;
-		if( threadIdx.x + offset < upper ) {
-			sW(Index,t_val = min(t_val,gW(Index + offset)));
+		if( threadIdx.x < offset ) {
+			sW(threadIdx.x,t_val = min(t_val,gW(threadIdx.x + offset)));
 		}__syncthreads();
 		upper = offset;
 	}
 	if (TileSize > 256) {
 		int offset = (upper + 1) / 2;
-		if( threadIdx.x + offset < upper ) {
-			sW(Index,t_val = min(t_val,gW(Index + offset)));
+		if( threadIdx.x < offset ) {
+			sW(threadIdx.x,t_val = min(t_val,gW(threadIdx.x + offset)));
 		}__syncthreads();
 		upper = offset;
 	}
 	if (TileSize > 128) {
 		int offset = (upper + 1) / 2;
-		if( threadIdx.x + offset < upper ) {
-			sW(Index,t_val = min(t_val,gW(Index + offset)));
+		if( threadIdx.x < offset ) {
+			sW(threadIdx.x,t_val = min(t_val,gW(threadIdx.x + offset)));
 		}__syncthreads();
 		upper = offset;
 	}
 	if (TileSize > 64) {
 		int offset = (upper + 1) / 2;
-		if( threadIdx.x + offset < upper ) {
-			sW(Index,t_val = min(t_val,gW(Index + offset)));
+		if( threadIdx.x < offset ) {
+			sW(threadIdx.x,t_val = min(t_val,gW(threadIdx.x + offset)));
 		}__syncthreads();
 		upper = offset;
 	}
 	if(TileSize > 32) {
 		int offset = (upper + 1) / 2;
-		if( threadIdx.x + offset < upper ) {
-			sW(Index,t_val = min(t_val,gW(Index + offset)));
+		if( threadIdx.x < offset ) {
+			sW(threadIdx.x,t_val = min(t_val,gW(threadIdx.x + offset)));
 		}__syncthreads();
-		upper = offset;
 	}
-			
-	int offset = (upper + 1) / 2;
-	if( threadIdx.x + offset < upper ) {
-		sW(Index,t_val = min(t_val,gW(Index + offset)));
-	}
-	upper = offset;
 	
-	offset = (upper + 1) / 2;
-	if( threadIdx.x + offset < upper ) {
-		sW(Index,t_val = min(t_val,gW(Index + offset)));
+	if( threadIdx.x < 16 ) {
+		sW(threadIdx.x,t_val = min(t_val,gW(threadIdx.x+ 16)));
 	}
-	upper = offset;
 	
-	offset = (upper + 1) / 2;
-	if( threadIdx.x + offset < upper ) {
-		sW(Index,t_val = min(t_val,gW(Index + offset)));
+	if( threadIdx.x < 8 ) {
+		sW(threadIdx.x,t_val = min(t_val,gW(threadIdx.x+ 8)));
 	}
-	upper = offset;
 	
-	offset = (upper + 1) / 2;
-	if( threadIdx.x + offset < upper ) {
-		sW(Index,t_val = min(t_val,gW(Index + offset)));
+	if( threadIdx.x < 4 ) {
+		sW(threadIdx.x,t_val = min(t_val,gW(threadIdx.x+ 4)));
 	}
-	upper = offset;
 	
-	offset = (upper + 1) / 2;
-	if( threadIdx.x + offset < upper ) {
-		sW(Index,t_val = min(t_val,gW(Index + offset)));
+	if( threadIdx.x < 2 ) {
+		sW(threadIdx.x,t_val = min(t_val,gW(threadIdx.x+ 2)));
+	}
+	
+	if( threadIdx.x < 1 ) {
+		sW(threadIdx.x,t_val = min(t_val,gW(1)));
 	}__syncthreads();
 	
 	
@@ -439,13 +408,17 @@ update(Data* &pos, int* &weight, int &minchange, int &mini, int &minj, const int
 	//__shared__ int winner;winner = blockDim.x;
 	if( maximum<Reductions,Status,TileSize>(minchange, cities) >= 0) return false;
 	
-	if (minchange == gW(0)) {
-		sW(1,((mini) << 16) + minj);
+	if(minchange == gW(0)) {
+		sW(1,threadIdx.x);
 	}__syncthreads();
 	
-	int tmp = gW(1);
-	mini = tmp >> 16;
-	minj = tmp & 0xffff;
+	if(gW(1) == threadIdx.x) {
+		sW(2,mini);
+		sW(3,minj);
+	}__syncthreads();
+	
+	mini = gW(2);
+	minj = gW(3);
 
 	// Fix path and weights
 	reverse(mini+1+threadIdx.x,minj-threadIdx.x,pos,weight);
