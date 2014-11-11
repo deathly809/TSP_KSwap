@@ -27,11 +27,6 @@
 static __device__ __managed__ int climbs_d = 0;
 static __device__ __managed__ int best_d = INT_MAX;
 
-// Buffer space, used for cache and maximum propagation
-extern __shared__ char buffer[];	// Our pool of memory to hand out to other three
-__shared__ float *x_buffer;
-__shared__ float *y_buffer;
-__shared__ int   *w_buffer;
 
 enum ThreadBufferStatus {MORE_THREADS_THAN_BUFFER,EQUAL_SIZE,MORE_BUFFER_THAN_THREADS};
 
@@ -52,12 +47,13 @@ template <int TileSize>
 static inline __device__ bool 
 initMemory(const Data* &pos_d, Data* &pos, int * &weight, const int &cities) {
 	__shared__ Data *d;
+	__shared__ int* w;
 	// Allocate my global memory
 	if(threadIdx.x == 0 ) {
 		d = new Data[cities + 1];
 		if(d != NULL) {
-			w_buffer = new int[cities];
-			if(w_buffer == NULL) {
+			w = new int[cities];
+			if(w == NULL) {
 				delete d;
 				d = NULL;
 			}
@@ -70,15 +66,10 @@ initMemory(const Data* &pos_d, Data* &pos, int * &weight, const int &cities) {
 	
 	// Save new memory locations
 	pos = d;
-	weight = w_buffer;
+	weight = w;
 	
 	for (int i = threadIdx.x; i < cities; i += blockDim.x) pos[i] = pos_d[i];
 	__syncthreads();
-	
-	// Initialize shared memory
-	x_buffer = (float*)buffer;
-	y_buffer = (float*)(buffer + sizeof(float) * TileSize);
-	w_buffer = (int*)(buffer + 2 * sizeof(float) * TileSize);
 	
 	return true;
 }
@@ -92,86 +83,77 @@ initMemory(const Data* &pos_d, Data* &pos, int * &weight, const int &cities) {
 // @return - The maximum value of t_val seen from all threads
 template <ThreadBufferStatus Status, int TileSize>
 static inline __device__ int 
-maximum(int t_val, const int &cities) {
-	
+maximum(int t_val, const int &cities, int* __restrict__ w_buffer) {
 	int upper = min(blockDim.x,min(TileSize,cities));
-	const int Index = (Status == MORE_THREADS_THAN_BUFFER)?(threadIdx.x%TileSize):threadIdx.x;
-	w_buffer[Index] = t_val;
-	__syncthreads();
 	
 	if(Status == MORE_THREADS_THAN_BUFFER) {
-		for(int i = 0 ; i <= TileSize / blockDim.x; ++i ) {
-			if(w_buffer[Index] > t_val) {
-				w_buffer[Index] = t_val;
-			}
-		}__syncthreads();
-	}
+		int Index = threadIdx.x % TileSize;
+		w_buffer[Index] = t_val;
+		__syncthreads();
+		for(int i = 0 ; i <= (blockDim.x/TileSize); ++i ) {
+			w_buffer[Index] = t_val = min(t_val,w_buffer[Index]);
+		}
+	}else {
+		w_buffer[threadIdx.x] = t_val;
+	}__syncthreads();
 	
+	// 1024
 	if (TileSize > 512) {
-		int offset = (upper + 1) / 2;
-		if( threadIdx.x + offset < upper ) {
-			w_buffer[Index] = t_val = min(t_val,w_buffer[Index + offset]);
+		int offset = (upper + 1) / 2;	// 200
+		if( threadIdx.x < offset) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x + offset]);
 		}__syncthreads();
 		upper = offset;
 	}
+	
+	// 512
 	if (TileSize > 256) {
-		int offset = (upper + 1) / 2;
-		if( threadIdx.x + offset < upper ) {
-			w_buffer[Index] = t_val = min(t_val,w_buffer[Index + offset]);
+		int offset = (upper + 1) / 2; // 100
+		if( threadIdx.x < offset) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x + offset]);
 		}__syncthreads();
 		upper = offset;
 	}
+	
+	// 256
 	if (TileSize > 128) {
-		int offset = (upper + 1) / 2;
-		if( threadIdx.x + offset < upper ) {
-			w_buffer[Index] = t_val = min(t_val,w_buffer[Index + offset]);
+		int offset = (upper + 1) / 2; // 50
+		if( threadIdx.x < offset) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x + offset]);
 		}__syncthreads();
 		upper = offset;
 	}
+	
+	// 128
 	if (TileSize > 64) {
-		int offset = (upper + 1) / 2;
-		if( threadIdx.x + offset < upper ) {
-			w_buffer[Index] = t_val = min(t_val,w_buffer[Index + offset]);
+		int offset = (upper + 1) / 2; // 25
+		if( threadIdx.x < offset) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x + offset]);
 		}__syncthreads();
 		upper = offset;
 	}
-	if(TileSize > 32) {
-		int offset = (upper + 1) / 2;
-		if( threadIdx.x + offset < upper ) {
-			w_buffer[Index] = t_val = min(t_val,w_buffer[Index + offset]);
-		}__syncthreads();
-		upper = offset;
-	}
-			
-	int offset = (upper + 1) / 2;
-	if( threadIdx.x + offset < upper ) {
-		w_buffer[Index] = t_val = min(t_val,w_buffer[Index + offset]);
-	}__syncthreads();
-	upper = offset;
 	
-	offset = (upper + 1) / 2;
-	if( threadIdx.x + offset < upper ) {
-		w_buffer[Index] = t_val = min(t_val,w_buffer[Index + offset]);
+	// 64 and down
+	if(threadIdx.x < 32) {
+		if(TileSize > 32 && blockDim.x > 32) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x+(upper+1)/2]);
+		}
+		if(threadIdx.x < 16) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x+16]);
+		}
+		if(threadIdx.x < 8) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x+8]);
+		}
+		if(threadIdx.x < 4) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x+4]);
+		}
+		if(threadIdx.x < 2) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x+2]);
+		}
+		if(threadIdx.x < 1) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x+1]);
+		}
 	}__syncthreads();
-	upper = offset;
-	
-	offset = (upper + 1) / 2;
-	if( threadIdx.x + offset < upper ) {
-		w_buffer[Index] = t_val = min(t_val,w_buffer[Index + offset]);
-	}__syncthreads();
-	upper = offset;
-	
-	offset = (upper + 1) / 2;
-	if( threadIdx.x + offset < upper ) {
-		w_buffer[Index] = t_val = min(t_val,w_buffer[Index + offset]);
-	}__syncthreads();
-	upper = offset;
-	
-	offset = (upper + 1) / 2;
-	if( threadIdx.x + offset < upper ) {
-		w_buffer[Index] = t_val = min(t_val,w_buffer[Index + offset]);
-	}__syncthreads();
-	
 	
 	return w_buffer[0];
 }
@@ -213,7 +195,7 @@ reverse(int start, int end, Data* &pos, int* &weight) {
 // @cities		- The number of cities along the path (excluding the end point)
 template <int TileSize>
 static __device__ void 
-singleIter(Data* &pos, int* &weight, int &minchange, int &mini, int &minj, const int &cities) {
+singleIter(Data* &pos, int* &weight, int &minchange, int &mini, int &minj, const int &cities, float* __restrict__ x_buffer, float* __restrict__ y_buffer, int* __restrict__ w_buffer) {
 	
 
 	for (int ii = 0; ii < cities - 2; ii += blockDim.x) {
@@ -284,9 +266,9 @@ singleIter(Data* &pos, int* &weight, int &minchange, int &mini, int &minj, const
 // @cities		- The number of cities along the path (excluding the end point)
 template <ThreadBufferStatus Status, int TileSize>
 static __device__ bool 
-update(Data* &pos, int* &weight, int &minchange, int &mini, int &minj, const int &cities) {
+update(Data* &pos, int* &weight, int &minchange, int &mini, int &minj, const int &cities, int* __restrict__ w_buffer) {
 
-	maximum<Status,TileSize>(minchange, cities);
+	maximum<Status,TileSize>(minchange, cities,w_buffer);
 	if(w_buffer[0] >= 0) return false;
 	
 	if (minchange == w_buffer[0]) {
@@ -354,13 +336,17 @@ TwoOpt(const Data *pos_d, const int cities) {
 		return;
 	}
 	
+	__shared__ float x_buffer[TileSize];
+	__shared__ float y_buffer[TileSize];
+	__shared__ int w_buffer[TileSize];
+	
 	permute(pos,weight,cities);
   
 	do {
 		++local_climbs;
     	minchange = mini = minj = 0;
-		singleIter<TileSize>(pos, weight, minchange, mini, minj, cities);
-	} while (update<Status,TileSize>(pos, weight, minchange, mini, minj, cities));
+		singleIter<TileSize>(pos, weight, minchange, mini, minj, cities, x_buffer, y_buffer, w_buffer);
+	} while (update<Status,TileSize>(pos, weight, minchange, mini, minj, cities, w_buffer));
 	
 	
 	w_buffer[0] = 0;
@@ -497,6 +483,10 @@ RunKernel(const int Restarts, const int Threads, const Data *Pos_d, const int Ci
 	const int Blocks = Restarts;
 	const ThreadBufferStatus Status = (Threads > TileSize) ? MORE_THREADS_THAN_BUFFER : (Threads < TileSize) ? MORE_BUFFER_THAN_THREADS : EQUAL_SIZE;
 	
+	// Weight and position
+	cudaDeviceSetLimit(cudaLimitMallocHeapSize,(sizeof(int) + sizeof(Data)) * (Cities +1 ) * Blocks);
+	CudaTest("cudaDeviceSetLimit");
+	
 	cudaEventCreate(&begin);
 	cudaEventCreate(&end);
 	
@@ -505,13 +495,13 @@ RunKernel(const int Restarts, const int Threads, const Data *Pos_d, const int Ci
 	cudaEventRecord(begin,0);
 	switch(Status) {
 		case MORE_THREADS_THAN_BUFFER:
-			TwoOpt<MORE_THREADS_THAN_BUFFER,TileSize><<<Restarts,Threads,Shared_Bytes>>>(Pos_d,Cities);
+			TwoOpt<MORE_THREADS_THAN_BUFFER,TileSize><<<Restarts,Threads>>>(Pos_d,Cities);
 			break;
 		case EQUAL_SIZE:
-			TwoOpt<EQUAL_SIZE,TileSize><<<Restarts,Threads,Shared_Bytes>>>(Pos_d,Cities);
+			TwoOpt<EQUAL_SIZE,TileSize><<<Restarts,Threads>>>(Pos_d,Cities);
 			break;
 		case MORE_BUFFER_THAN_THREADS:
-			TwoOpt<MORE_BUFFER_THAN_THREADS,TileSize><<<Restarts,Threads,Shared_Bytes>>>(Pos_d,Cities);
+			TwoOpt<MORE_BUFFER_THAN_THREADS,TileSize><<<Restarts,Threads>>>(Pos_d,Cities);
 			break;
 	};
 	cudaEventRecord(end,0);

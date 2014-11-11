@@ -26,15 +26,15 @@
 static __device__ __managed__ int climbs_d = 0;
 static __device__ __managed__ int best_d = INT_MAX;
 // Buffer space, used for cache and maximum propagation
-extern __shared__ char buffer[];	// Our pool of memory to hand out to other three
-__shared__ float *x_buffer;
-__shared__ float *y_buffer;
-__shared__ int   *w_buffer;
+//extern __shared__ char buffer[];	// Our pool of memory to hand out to other three
+//__shared__ float *x_buffer;
+//__shared__ float *y_buffer;
+//__shared__ int   *w_buffer;
 
 enum ThreadBufferStatus {MORE_THREADS_THAN_BUFFER,EQUAL_SIZE,MORE_BUFFER_THAN_THREADS};
 
 // Data structure used to hold position along path
-struct __align__(8) Data {
+struct Data {
 	float x,y;
 };
 
@@ -47,12 +47,13 @@ struct __align__(8) Data {
 //	@return	- Returns true if initialization was successful, false otherwise.
 template <int TileSize> static inline __device__ bool initMemory(const Data* &pos_d, Data* &pos, int * &weight, const int &cities) {
 	__shared__ Data *d;
+	__shared__ int* w;
 	// Allocate my global memory
 	if(threadIdx.x == 0 ) {
 		d = new Data[cities + 1];
 		if(d != NULL) {
-			w_buffer = new int[cities];
-			if(w_buffer == NULL) {
+			w = new int[cities];
+			if(w == NULL) {
 				delete d;
 				d = NULL;
 			}
@@ -65,17 +66,38 @@ template <int TileSize> static inline __device__ bool initMemory(const Data* &po
 	
 	// Save new memory locations
 	pos = d;
-	weight = w_buffer;
+	weight = w;
 	
 	for (int i = threadIdx.x; i < cities; i += blockDim.x) pos[i] = pos_d[i];
 	__syncthreads();
 	
-	// Initialize shared memory
-	x_buffer = (float*)buffer;
-	y_buffer = (float*)(buffer + sizeof(float) * TileSize);
-	w_buffer = (int*)(buffer + 2 * sizeof(float) * TileSize);
-	
 	return true;
+}
+
+//
+// Given a path we randomly permute it into a new new path and then initialize the weights of the path.
+//
+// @pos			- The current Hamiltonian path 
+// @weight		- The current weight of our edges along the path
+// @cities		- The number of cities along the path (excluding the end point)
+static __device__ inline void
+permute(Data* &pos, int* &weight, const int &cities) {
+	if (threadIdx.x == 0) {  // serial permutation
+		curandState rndstate;
+		curand_init(blockIdx.x, 0, 0, &rndstate);
+		for (int i = 1; i < cities; i++) {
+			int j = curand(&rndstate) % (cities - 1) + 1;
+			
+			Data d = pos[i];
+			pos[i] = pos[j];
+			pos[j] = d;
+		}
+		pos[cities] = pos[0];
+	}__syncthreads();
+	
+	for (int i = threadIdx.x; i < cities; i += blockDim.x) weight[i] = -dist(i, i + 1);
+	__syncthreads();
+	
 }
 
 //
@@ -87,86 +109,77 @@ template <int TileSize> static inline __device__ bool initMemory(const Data* &po
 // @return - The maximum value of t_val seen from all threads
 template <ThreadBufferStatus Status, int TileSize>
 static inline __device__ int
-maximum(int t_val, const int &cities) {
-	
+maximum(int t_val, const int &cities, int* __restrict__ w_buffer) {
 	int upper = min(blockDim.x,min(TileSize,cities));
-	const int Index = (Status == MORE_THREADS_THAN_BUFFER)?(threadIdx.x%TileSize):threadIdx.x;
-	w_buffer[Index] = t_val;
-	__syncthreads();
 	
 	if(Status == MORE_THREADS_THAN_BUFFER) {
-		for(int i = 0 ; i <= TileSize / blockDim.x; ++i ) {
-			if(w_buffer[Index] < t_val) {
-				w_buffer[Index] = t_val;
-			}
-		}__syncthreads();
-	}
+		int Index = threadIdx.x % TileSize;
+		w_buffer[Index] = t_val;
+		__syncthreads();
+		for(int i = 0 ; i <= (blockDim.x/TileSize); ++i ) {
+			w_buffer[Index] = t_val = min(t_val,w_buffer[Index]);
+		}
+	}else {
+		w_buffer[threadIdx.x] = t_val;
+	}__syncthreads();
 	
+	// 1024
 	if (TileSize > 512) {
-		int offset = (upper + 1) / 2;
-		if( threadIdx.x + offset < upper ) {
-			w_buffer[Index] = t_val = min(t_val,w_buffer[Index + offset]);
+		int offset = (upper + 1) / 2;	// 200
+		if( threadIdx.x < offset) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x + offset]);
 		}__syncthreads();
 		upper = offset;
 	}
+	
+	// 512
 	if (TileSize > 256) {
-		int offset = (upper + 1) / 2;
-		if( threadIdx.x + offset < upper ) {
-			w_buffer[Index] = t_val = min(t_val,w_buffer[Index + offset]);
+		int offset = (upper + 1) / 2; // 100
+		if( threadIdx.x < offset) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x + offset]);
 		}__syncthreads();
 		upper = offset;
 	}
+	
+	// 256
 	if (TileSize > 128) {
-		int offset = (upper + 1) / 2;
-		if( threadIdx.x + offset < upper ) {
-			w_buffer[Index] = t_val = min(t_val,w_buffer[Index + offset]);
+		int offset = (upper + 1) / 2; // 50
+		if( threadIdx.x < offset) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x + offset]);
 		}__syncthreads();
 		upper = offset;
 	}
+	
+	// 128
 	if (TileSize > 64) {
-		int offset = (upper + 1) / 2;
-		if( threadIdx.x + offset < upper ) {
-			w_buffer[Index] = t_val = min(t_val,w_buffer[Index + offset]);
+		int offset = (upper + 1) / 2; // 25
+		if( threadIdx.x < offset) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x + offset]);
 		}__syncthreads();
 		upper = offset;
 	}
-	if(TileSize > 32) {
-		int offset = (upper + 1) / 2;
-		if( threadIdx.x + offset < upper ) {
-			w_buffer[Index] = t_val = min(t_val,w_buffer[Index + offset]);
-		}__syncthreads();
-		upper = offset;
-	}
-			
-	int offset = (upper + 1) / 2;
-	if( threadIdx.x + offset < upper ) {
-		w_buffer[Index] = t_val = min(t_val,w_buffer[Index + offset]);
-	}__syncthreads();
-	upper = offset;
 	
-	offset = (upper + 1) / 2;
-	if( threadIdx.x + offset < upper ) {
-		w_buffer[Index] = t_val = min(t_val,w_buffer[Index + offset]);
+	// 64 and down
+	if(threadIdx.x < 32) {
+		if(TileSize > 32 && blockDim.x > 32) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x+(upper+1)/2]);
+		}
+		if(threadIdx.x < 16) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x+16]);
+		}
+		if(threadIdx.x < 8) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x+8]);
+		}
+		if(threadIdx.x < 4) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x+4]);
+		}
+		if(threadIdx.x < 2) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x+2]);
+		}
+		if(threadIdx.x < 1) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x+1]);
+		}
 	}__syncthreads();
-	upper = offset;
-	
-	offset = (upper + 1) / 2;
-	if( threadIdx.x + offset < upper ) {
-		w_buffer[Index] = t_val = min(t_val,w_buffer[Index + offset]);
-	}__syncthreads();
-	upper = offset;
-	
-	offset = (upper + 1) / 2;
-	if( threadIdx.x + offset < upper ) {
-		w_buffer[Index] = t_val = min(t_val,w_buffer[Index + offset]);
-	}__syncthreads();
-	upper = offset;
-	
-	offset = (upper + 1) / 2;
-	if( threadIdx.x + offset < upper ) {
-		w_buffer[Index] = t_val = min(t_val,w_buffer[Index + offset]);
-	}__syncthreads();
-	
 	
 	return w_buffer[0];
 }
@@ -199,7 +212,42 @@ reverse(int start, int end, Data* &pos, int* &weight) {
 }
 
 //
+// Perform the swaps to the edges i and j to decrease the total length of our 
+// path and update the weight and pos arrays appropriately.
+//
+// @pos			- The current Hamiltonian path 
+// @weight		- The current weight of our edges along the path
+// @minchange 	- The current best change we can make
+// @mini		- The ith city in the path that is part of the swap
+// @minj		- The jth city in the path that is part of the swap
+// @cities		- The number of cities along the path (excluding the end point)
+template <ThreadBufferStatus Status, int TileSize>
+static __device__ bool
+update(Data* &pos, int* &weight, int &minchange, int &mini, int &minj, const int &cities, int* __restrict__ w_buffer) {
+
+	maximum<Status,TileSize>(minchange, cities, w_buffer);
+	if(w_buffer[0] >= 0) return false;
+	
+	if (minchange == w_buffer[0]) {
+		w_buffer[1] = ((mini) << 16) + minj;  // non-deterministic winner
+	}__syncthreads();
+
+	mini = w_buffer[1] >> 16;
+	minj = w_buffer[1] & 0xffff;
+	
+	// Fix path and weights
+	reverse(mini+1+threadIdx.x,minj-threadIdx.x,pos,weight);
+	
+	// Fix connecting points
+	weight[mini] = -dist(mini,mini+1);
+	weight[minj] = -dist(minj,minj+1);
+	__syncthreads();
+	return true;
+}
+
+//
 // Perform a single iteration of Two-Opt
+//
 // @pos			- The current Hamiltonian path 
 // @weight		- The current weight of our edges along the path
 // @minchange 	- The current best change we can make
@@ -208,7 +256,7 @@ reverse(int start, int end, Data* &pos, int* &weight) {
 // @cities		- The number of cities along the path (excluding the end point)
 template <int TileSize>
 static __device__ void
-singleIter(Data* &pos, int* &weight, int &minchange, int &mini, int &minj, const int &cities) {
+singleIter(Data* &pos, int* &weight, int &minchange, int &mini, int &minj, const int &cities,  float* __restrict__ x_buffer,  float* __restrict__ y_buffer,  int* __restrict__ w_buffer) {
 	
 
 	for (int ii = 0; ii < cities - 2; ii += blockDim.x) {
@@ -269,65 +317,23 @@ singleIter(Data* &pos, int* &weight, int &minchange, int &mini, int &minj, const
 }
 
 //
-// Perform the swaps to the edges i and j to decrease the total length of our 
-// path and update the weight and pos arrays appropriately.
+// Releases memory and saves results
 //
-// @pos			- The current Hamiltonian path 
-// @weight		- The current weight of our edges along the path
-// @minchange 	- The current best change we can make
-// @mini		- The ith city in the path that is part of the swap
-// @minj		- The jth city in the path that is part of the swap
-// @cities		- The number of cities along the path (excluding the end point)
-template <ThreadBufferStatus Status, int TileSize>
-static __device__ bool
-update(Data* &pos, int* &weight, int &minchange, int &mini, int &minj, const int &cities) {
-
-	maximum<Status,TileSize>(minchange, cities);
-	if(w_buffer[0] >= 0) return false;
-	
-	if (minchange == w_buffer[0]) {
-		w_buffer[1] = ((mini) << 16) + minj;  // non-deterministic winner
-	}__syncthreads();
-
-	mini = w_buffer[1] >> 16;
-	minj = w_buffer[1] & 0xffff;
-	
-	// Fix path and weights
-	reverse(mini+1+threadIdx.x,minj-threadIdx.x,pos,weight);
-	
-	// Fix connecting points
-	weight[mini] = -dist(mini,mini+1);
-	weight[minj] = -dist(minj,minj+1);
-	__syncthreads();
-	return true;
+// @pos				- Pointer to allocated path memory
+// @weight			- Pointer to allocated edge weight memory
+// @local_climbs	- The number of climbs performed by this block
+// @best_length		- The best length this block found.
+static __device__ inline void cleanup(Data* &pos, int* &weight, int &local_climbs, int &best_length) {
+	if (threadIdx.x == 0) {
+		// Save data
+		atomicAdd(&climbs_d,local_climbs);
+		atomicMin(&best_d, best_length);
+		
+		// Release memory
+		delete pos;
+		delete weight;
+	}
 }
-
-//
-// Given a path we randomly permute it into a new new path and then initialize the weights of the path.
-//
-// @pos			- The current Hamiltonian path 
-// @weight		- The current weight of our edges along the path
-// @cities		- The number of cities along the path (excluding the end point)
-static __device__ inline void
-permute(Data* &pos, int* &weight, const int &cities) {
-	if (threadIdx.x == 0) {  // serial permutation
-		curandState rndstate;
-		curand_init(blockIdx.x, 0, 0, &rndstate);
-		for (int i = 1; i < cities; i++) {
-			int j = curand(&rndstate) % (cities - 1) + 1;
-			
-			Data d = pos[i];
-			pos[i] = pos[j];
-			pos[j] = d;
-		}
-		pos[cities] = pos[0];
-	}__syncthreads();
-	
-	for (int i = threadIdx.x; i < cities; i += blockDim.x) weight[i] = -dist(i, i + 1);
-	__syncthreads();
-	
-}
-
 
 //
 // Perform iterative two-opt until there can be no more swaps to reduce the path length.
@@ -350,6 +356,9 @@ TwoOpt(const int Restarts, const Data *pos_d, const int cities) {
 		return;
 	}
 	
+	__shared__ float 	x_buffer[TileSize];
+	__shared__ float 	y_buffer[TileSize];
+	__shared__ int		w_buffer[TileSize];
 	
 	for(int r = blockIdx.x ; r < Restarts; r += gridDim.x) {
 	
@@ -360,8 +369,8 @@ TwoOpt(const int Restarts, const Data *pos_d, const int cities) {
 		do {
 			++local_climbs;
 			minchange = mini = minj = 0;
-			singleIter<TileSize>(pos, weight, minchange, mini, minj, cities);
-		} while (update<Status,TileSize>(pos, weight, minchange, mini, minj, cities));
+			singleIter<TileSize>(pos, weight, minchange, mini, minj, cities, x_buffer, y_buffer, w_buffer);
+		} while (update<Status,TileSize>(pos, weight, minchange, mini, minj, cities, w_buffer));
 	
 		w_buffer[0] = 0;
 		__syncthreads();
@@ -377,18 +386,9 @@ TwoOpt(const int Restarts, const Data *pos_d, const int cities) {
 				best_length = w_buffer[0];
 			}
 		}
-		
 	}
 	
-  if (threadIdx.x == 0) {
-	// Save data
-	atomicAdd(&climbs_d,local_climbs);
-    atomicMin(&best_d, best_length);
-	
-	// Release memory
-	delete pos;
-	delete weight;
-  }
+	cleanup(pos, weight, local_climbs, best_length);
 }
 
 
@@ -545,8 +545,12 @@ _wrapStatus(const int Restarts, const int Threads, const Data *Pos_d, const int 
 	const ThreadBufferStatus Status = (Threads > TileSize) ? MORE_THREADS_THAN_BUFFER : (Threads < TileSize) ? MORE_BUFFER_THAN_THREADS : EQUAL_SIZE;
 	float time;
 
+	const int DeviceBytes = 2 * (sizeof(int) + sizeof(Data)) * (Cities + 1) * Blocks;
+	cudaDeviceSetLimit(cudaLimitMallocHeapSize, DeviceBytes);
+	CudaTest("cudaDeviceSetLimit");
+	
 	// Output runtime configuration
-	std::cout << "Blocks = " << Blocks << ", Threads  = " << Threads << ", TileSize = " << TileSize << ", Status = " << getName(Status) << ", Shared Bytes = " << Shared_Bytes << std::endl;
+	std::cout << "Blocks = " << Blocks << ", Threads  = " << Threads << ", TileSize = " << TileSize << ", Status = " << getName(Status) << ", Shared Bytes = " << Shared_Bytes << ", Device Bytes = " << DeviceBytes << std::endl;
 
 	cudaEvent_t begin,end;
 	cudaEventCreate(&begin);
@@ -555,19 +559,19 @@ _wrapStatus(const int Restarts, const int Threads, const Data *Pos_d, const int 
 	switch(Status) {
 		case MORE_THREADS_THAN_BUFFER:
 			cudaEventRecord(begin,0);
-			TwoOpt<MORE_THREADS_THAN_BUFFER,TileSize><<<Blocks,Threads,Shared_Bytes>>>(Restarts,Pos_d,Cities);
+			TwoOpt<MORE_THREADS_THAN_BUFFER,TileSize><<<Blocks,Threads>>>(Restarts,Pos_d,Cities);
 			cudaEventRecord(end,0);
 			cudaEventSynchronize(end);
 			break;
 		case EQUAL_SIZE:
 			cudaEventRecord(begin,0);
-			TwoOpt<EQUAL_SIZE,TileSize><<<Blocks,Threads,Shared_Bytes>>>(Restarts,Pos_d,Cities);
+			TwoOpt<EQUAL_SIZE,TileSize><<<Blocks,Threads>>>(Restarts,Pos_d,Cities);
 			cudaEventRecord(end,0);
 			cudaEventSynchronize(end);
 			break;
 		case MORE_BUFFER_THAN_THREADS:
 			cudaEventRecord(begin,0);
-			TwoOpt<MORE_BUFFER_THAN_THREADS,TileSize><<<Blocks,Threads,Shared_Bytes>>>(Restarts,Pos_d,Cities);
+			TwoOpt<MORE_BUFFER_THAN_THREADS,TileSize><<<Blocks,Threads>>>(Restarts,Pos_d,Cities);
 			cudaEventRecord(end,0);
 			cudaEventSynchronize(end);
 			break;

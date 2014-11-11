@@ -23,100 +23,9 @@
 #define dist(a, b) __float2int_rn(sqrtf((pos[a].x - pos[b].x) * (pos[a].x - pos[b].x) + (pos[a].y - pos[b].y) * (pos[a].y - pos[b].y)))
 #define swap(a, b) {float tmp = a;  a = b;  b = tmp;}
 
-static __device__ int climbs_d = 0;
-static __device__ int best_d = INT_MAX;
-static __device__ int restart_d = 0;
-// Buffer space, used for cache and maximum propagation
-
-#define DEBUG 0
-#define MICRO 0
-
-
-#if DEBUG
-
-#if MICRO
-static __device__ unsigned long long int d_lDuration = 0;
-static __device__ unsigned long long int d_cDuration = 0;
-static __device__ unsigned long long int d_pDuration = 0;
-
-static __device__ long long int load_duration[128] = {0};
-static __device__ long long int compute_duration[128] = {0};
-static __device__ long long int propagate_duration[128] = {0};
-
-#else 
-static __device__ unsigned long long int d_uDuration = 0;
-static __device__ unsigned long long int d_sDuration = 0;
-
-static __device__ long long int update_duration[128] = {0};
-static __device__ long long int single_duration[128] = {0};
-#endif
-
-#endif
-
-// Insturnmentation
-
-// Load
-static __device__ void inline load_start() {
-#if DEBUG && MICRO
-	if(threadIdx.x == 0) {load_duration[blockIdx.x] -= clock64();}
-#endif
-}
-static __device__ void inline load_end() {
-#if DEBUG && MICRO
-	if(threadIdx.x == 0) {load_duration[blockIdx.x] += clock64();}
-#endif
-}
-
-// Compute
-static __device__ void inline compute_start() {
-#if DEBUG && MICRO
-	if(threadIdx.x == 0) {compute_duration[blockIdx.x] -= clock64();}
-#endif
-}
-static __device__ void inline compute_end() {
-#if DEBUG && MICRO
-	if(threadIdx.x == 0) {compute_duration[blockIdx.x] += clock64();}
-#endif
-}
-
-
-// Compute
-static __device__ void inline propagate_start() {
-#if DEBUG && MICRO
-	if(threadIdx.x == 0) {propagate_duration[blockIdx.x] -= clock64();}
-#endif
-}
-static __device__ void inline propagate_end() {
-#if DEBUG && MICRO
-	if(threadIdx.x == 0) {propagate_duration[blockIdx.x] += clock64();}
-#endif
-}
-
-// Single_iter
-static __device__ void inline single_start() {
-#if DEBUG && !MICRO
-	if(threadIdx.x == 0 && DEBUG) {single_duration[blockIdx.x] -= clock64();}
-#endif
-}
-static __device__ void inline single_end() {
-#if DEBUG && !MICRO
-	if(threadIdx.x == 0 && DEBUG) {single_duration[blockIdx.x] += clock64();}
-#endif
-}
-
-// Update
-static __device__ void inline update_start() {
-#if DEBUG && !MICRO
-	if(threadIdx.x == 0) {update_duration[blockIdx.x] -= clock64();}
-#endif
-}
-static __device__ void inline update_end() {
-#if DEBUG && !MICRO
-	if(threadIdx.x == 0) {update_duration[blockIdx.x] += clock64();}
-#endif
-}
-
-
+static __device__ __managed__ int climbs_d = 0;
+static __device__ __managed__ int best_d = INT_MAX;
+static __device__ unsigned int restart_d = 0;
 
 enum ThreadBufferStatus {MORE_THREADS_THAN_BUFFER,EQUAL_SIZE,MORE_BUFFER_THAN_THREADS};
 
@@ -130,11 +39,12 @@ struct __align__(8) Data {
 //
 // @return  - Returns the next unique int
 static __device__ inline int
-nextInt(int* __restrict__ w_buffer) {
+nextInt() {
+	__shared__ int next;
 	if(threadIdx.x==0) {
-		w_buffer[0] = atomicAdd(&restart_d,1);
+		next = atomicAdd(&restart_d,1);
 	}__syncthreads();
-	return w_buffer[0];
+	return next;
 }
 
 // Allocates and initializes my global memory and shared memory.
@@ -187,8 +97,91 @@ initMemory(const Data* &pos_d, Data* &pos, int * &weight, const int &cities) {
 // @return - The maximum value of t_val seen from all threads
 template <ThreadBufferStatus Status, int TileSize>
 static inline __device__ int
-maximum(int t_val, const int &cities, int* __restrict__ &w_buffer) {
-	propagate_start();
+maximum(int t_val, const int &cities, int* __restrict__ w_buffer) {
+
+#if 0
+
+	// What happens if everyone writes to index 0 then atomicMin
+	w_buffer[0] = t_val;
+	__syncthreads();
+	atomicMin(w_buffer,t_val);
+	__syncthreads();
+	
+#elif 0
+
+	// What happens if only thread 0 writes to index 0 then atomicMin
+	if(threadIdx.x==0) w_buffer[0] = t_val;
+	__syncthreads();
+	atomicMin(w_buffer,t_val);
+	__syncthreads();
+	
+#elif 0
+
+	// What happens if everyone write to their own index then atomicMin on index 0?
+	if(Status == MORE_THREADS_THAN_BUFFER) {
+	w_buffer[threadIdx.x%TileSize] = t_val;  // Serializes the writes
+	}else{ 
+		w_buffer[threadIdx.x] = t_val;
+	}__syncthreads();
+	atomicMin(w_buffer,t_val);
+	__syncthreads();
+	
+#elif 0
+
+	// What happens if we atomicMin only when more threads than shared
+	// to reduce number of values to test to fit in buffer?
+	if(Status == MORE_THREADS_THAN_BUFFER) {
+		w_buffer[threadIdx.x%TileSize] = t_val;
+		__syncthreads();
+		atomicMin(threadIdx.x%TileSize + w_buffer,t_val);	// serialized
+	}else{
+		w_buffer[threadIdx.x] = t_val;
+	}__syncthreads();
+	
+	int upper = min(blockDim.x,min(TileSize,cities));
+	do {
+		int offset = (upper + 1)/2;
+		if( threadIdx.x < offset) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x + offset]);
+		}__syncthreads();
+		upper = offset;
+	}while( upper > 1);
+
+#elif 0
+
+	//  What happens if we don't use atomicMin to reduce amount of values to test but
+	// rather use a for-loop to reduce the values?
+	if(Status == MORE_THREADS_THAN_BUFFER) {
+		const int Index = threadIdx.x % TileSize;
+		w_buffer[Index] = t_val;
+		__syncthreads();
+		for(int i = 0 ; i <= blockDim.x/TileSize; ++i) {
+			if(t_val < w_buffer[Index]) {
+				w_buffer[Index] = t_val;
+			}
+		}
+	}else{
+		w_buffer[threadIdx.x] = t_val;
+	}
+	
+	int upper = min(blockDim.x,min(TileSize,cities));
+	
+	do {
+		__syncthreads();
+		int offset = (upper + 1)/2;
+		if( threadIdx.x < offset) {
+			int tmp = w_buffer[threadIdx.x + offset];
+			if(tmp < t_val) { 
+				w_buffer[threadIdx.x] = t_val = tmp;
+			}
+		}
+		upper = offset;
+	}while( upper > 1);
+	__syncthreads();
+
+#else
+
+	// What happens if we try to template out everything and loop unroll?
 	int upper = min(blockDim.x,min(TileSize,cities));
 	
 	if(Status == MORE_THREADS_THAN_BUFFER) {
@@ -292,7 +285,7 @@ maximum(int t_val, const int &cities, int* __restrict__ &w_buffer) {
 			}
 		}
 	}__syncthreads();
-	propagate_end();
+#endif
 	return w_buffer[0];
 }
 
@@ -334,7 +327,8 @@ reverse(int start, int end, Data* &pos, int* &weight) {
 template <int TileSize>
 static __device__ void
 singleIter(Data* &pos, int* &weight, int &minchange, int &mini, int &minj, const int &cities, float* __restrict__ x_buffer, float* __restrict__ y_buffer, int* __restrict__ w_buffer) {
-	single_start();
+	
+
 	for (int ii = 0; ii < cities - 2; ii += blockDim.x) {
 		int i = ii + threadIdx.x;
 		float pxi0, pyi0, pxi1, pyi1, pxj1, pyj1;
@@ -352,7 +346,7 @@ singleIter(Data* &pos, int* &weight, int &minchange, int &mini, int &minj, const
 		for (int jj = cities - 1; jj >= ii + 2; jj -= TileSize) {
 		
 			int bound = jj - TileSize + 1;
-			load_start();
+			
 			for(int k = threadIdx.x; k < TileSize; k += blockDim.x) {
 				int index = k + bound;
 				if (index >= (ii + 2)) {
@@ -361,10 +355,7 @@ singleIter(Data* &pos, int* &weight, int &minchange, int &mini, int &minj, const
 					w_buffer[k] = weight[index];
 				}
 			}__syncthreads();
-			
-			load_end();
-			compute_start();
-			
+
 			int lower = bound;
 			if (lower < i + 2) lower = i + 2;
 			
@@ -387,14 +378,12 @@ singleIter(Data* &pos, int* &weight, int &minchange, int &mini, int &minj, const
 					minj = j;
 				}
 			}__syncthreads();
-			compute_end();
 		}
 
 		if (i < cities - 2) {
 			minchange += weight[i];
 		}
 	}
-	single_end();
 }
 
 //
@@ -409,15 +398,10 @@ singleIter(Data* &pos, int* &weight, int &minchange, int &mini, int &minj, const
 // @cities		- The number of cities along the path (excluding the end point)
 template <ThreadBufferStatus Status, int TileSize>
 static __device__ bool
-update(Data* &pos, int* &weight, int &minchange, int &mini, int &minj, const int &cities, int* __restrict__ w_buffer) {
+update(Data* &pos, int* &weight, int &minchange, int &mini, int &minj, const int &cities,int* __restrict__ w_buffer) {
 
-	update_start();
-	
 	maximum<Status,TileSize>(minchange, cities, w_buffer);
-	if(w_buffer[0] >= 0) {
-		update_end();
-		return false;
-	}
+	if(w_buffer[0] >= 0) return false;
 	
 	while(w_buffer[0] < 0) {
 	
@@ -446,7 +430,6 @@ update(Data* &pos, int* &weight, int &minchange, int &mini, int &minj, const int
 		__syncthreads();
 		maximum<Status,TileSize>(minchange, cities, w_buffer);
 	}
-	update_end();
 	return true;
 }
 
@@ -485,8 +468,7 @@ permute(Data* &pos, int* &weight, const int &cities) {
 // @weight			- Pointer to allocated edge weight memory
 // @local_climbs	- The number of climbs performed by this block
 // @best_length		- The best length this block found.
-static __device__ inline void
-cleanup(Data* &pos, int* &weight, int &local_climbs, int &best_length) {
+static __device__ inline void cleanup(Data* &pos, int* &weight, int &local_climbs, int &best_length) {
 	if (threadIdx.x == 0) {
 		// Save data
 		atomicAdd(&climbs_d,local_climbs);
@@ -513,10 +495,6 @@ TwoOpt(const int Restarts, const Data *pos_d, const int cities) {
 	int 	local_climbs = 0;
 	int		best_length = INT_MAX;
 	
-	__shared__ float x_buffer[TileSize];
-	__shared__ float y_buffer[TileSize];
-	__shared__ int w_buffer[TileSize];
-	
 	if( !initMemory<TileSize>(pos_d,pos,weight,cities) ) {
 		if(threadIdx.x == 0) {
 			printf("Memory initialization error for block %d\n", blockIdx.x);
@@ -524,7 +502,12 @@ TwoOpt(const int Restarts, const Data *pos_d, const int cities) {
 		return;
 	}
 	
-	for(int r = nextInt(w_buffer) ; r < Restarts; r = nextInt(w_buffer)) {
+	__shared__ float x_buffer[TileSize];
+	__shared__ float y_buffer[TileSize];
+	__shared__ int   w_buffer[TileSize];
+	
+	
+	for(int r = nextInt() ; r < Restarts; r = nextInt()) {
 	
 		int mini,minj,minchange;
 		
@@ -533,8 +516,8 @@ TwoOpt(const int Restarts, const Data *pos_d, const int cities) {
 		do {
 			++local_climbs;
 			minchange = mini = minj = 0;
-			singleIter<TileSize>(pos, weight, minchange, mini, minj, cities, x_buffer, y_buffer, w_buffer);
-		} while (update<Status,TileSize>(pos, weight, minchange, mini, minj, cities, w_buffer));
+			singleIter<TileSize>(pos, weight, minchange, mini, minj, cities,x_buffer,y_buffer,w_buffer);
+		} while (update<Status,TileSize>(pos, weight, minchange, mini, minj, cities,w_buffer));
 	
 		w_buffer[0] = 0;
 		__syncthreads();
@@ -545,7 +528,7 @@ TwoOpt(const int Restarts, const Data *pos_d, const int cities) {
 		atomicAdd(w_buffer,term);
 		__syncthreads();
 
-		if(threadIdx.x == 0) {
+		if(threadIdx.x==0) {
 			if(w_buffer[0] < best_length) {
 				best_length = w_buffer[0];
 			}
@@ -555,19 +538,6 @@ TwoOpt(const int Restarts, const Data *pos_d, const int cities) {
 	
 	cleanup(pos, weight, local_climbs, best_length);
 	
-	if(threadIdx.x==0) {
-#if DEBUG
-
-#if MICRO
-		atomicAdd(&d_lDuration,load_duration[blockIdx.x]);
-		atomicAdd(&d_cDuration,compute_duration[blockIdx.x]);
-		atomicAdd(&d_pDuration,propagate_duration[blockIdx.x]);
-#else
-		atomicAdd(&d_uDuration,update_duration[blockIdx.x]);
-		atomicAdd(&d_sDuration,single_duration[blockIdx.x]);
-#endif
-#endif
-	}
 }
 
 
@@ -671,16 +641,6 @@ getName(const ThreadBufferStatus status) {
 }
 
 
-int getMaxSharedMemory( int major ) {
-	if(major < 3) {
-		return 16384;
-	}else if(major < 5) {
-		return 32768;
-	}else {
-		return 65536;
-	}
-}
-
 //
 // Calculates the maximum number of resident blocks that the card can hold
 //
@@ -693,16 +653,14 @@ getMaxBlocks(const int Shared_Bytes, const int Threads) {
 	cudaDeviceProp props;
 	cudaGetDeviceProperties(&props,0);
 
-	std::cout << "Compute Version " << props.major << "."  << props.minor << std::endl;
-	
 	if(props.major < 3) {
 		const int Max_Shared = 16384;
 		const int Block_Shared_Limit = (Max_Shared / Shared_Bytes);
 		return props.multiProcessorCount * min(8,min(Block_Shared_Limit,(int)(2048/Threads)));
 	}else if(props.major < 5) {
-		const int Max_Shared = 49152;
+		const int Max_Shared = 32768;
 		const int Block_Shared_Limit = (Max_Shared / Shared_Bytes);
-		return props.multiProcessorCount * max(16,min(Block_Shared_Limit,(int)(2048/Threads)));
+		return props.multiProcessorCount * min(16,min(Block_Shared_Limit,(int)(2048/Threads)));
 	}else {
 		const int Max_Shared = 65536;
 		const int Block_Shared_Limit = (Max_Shared / Shared_Bytes);
@@ -731,7 +689,7 @@ static float
 _wrapStatus(const int Restarts, const int Threads, const Data *Pos_d, const int Cities) {
 
 	const int Shared_Bytes = (sizeof(int) + 2*sizeof(float)) * TileSize;
-	const int Blocks = 2 * min(Restarts,getMaxBlocks(Shared_Bytes,Threads));
+	const int Blocks = min(Restarts,getMaxBlocks(Shared_Bytes,Threads));
 	const ThreadBufferStatus Status = (Threads > TileSize) ? MORE_THREADS_THAN_BUFFER : (Threads < TileSize) ? MORE_BUFFER_THAN_THREADS : EQUAL_SIZE;
 	float time;
 
@@ -745,8 +703,9 @@ _wrapStatus(const int Restarts, const int Threads, const Data *Pos_d, const int 
 	cudaEvent_t begin,end;
 	cudaEventCreate(&begin);
 	cudaEventCreate(&end);
-	cudaDeviceSetSharedMemConfig(cudaSharedMemBankSizeEightByte);
-	cudaThreadSetCacheConfig( cudaFuncCachePreferShared  );
+	cudaDeviceSetCacheConfig(cudaFuncCachePreferEqual);
+	cudaDeviceSetSharedMemConfig(cudaSharedMemBankSizeFourByte);
+
 	switch(Status) {
 		case MORE_THREADS_THAN_BUFFER:
 			cudaEventRecord(begin,0);
@@ -850,16 +809,6 @@ RunKernel(const int Cities, const Data *Pos, const int Restarts, const int Threa
 		case 1024:
 			return _wrapStatus<1024>(Restarts,Threads,Pos,Cities);
 		default:
-			cudaDeviceProp props;
-			cudaGetDeviceProperties(&props,0);
-			int sharedMemBytes = getMaxSharedMemory( props.major ) / (2 * (sizeof(int) + 2 * sizeof(float)));
-			if( sharedMemBytes < 1344 && sharedMemBytes >= 1024 ) {
-				return _wrapStatus<1024>(Restarts,Threads,Pos,Cities);
-			} else if( sharedMemBytes < 2048 && sharedMemBytes >= 1344 ) {
-				return _wrapStatus<1344>(Restarts,Threads,Pos,Cities);
-			}else if( sharedMemBytes >= 2048 ) {
-				return _wrapStatus<2048>(Restarts,Threads,Pos,Cities);
-			}
 			std::cout << "Invalid TileSize = " << TileSize << std::endl;
 			exit(-1);
 	};
@@ -867,15 +816,9 @@ RunKernel(const int Cities, const Data *Pos, const int Restarts, const int Threa
 }
 
 
+
 //
 //	Main entry point to program.
-//
-//
-//	argv[0] - program name
-//	argv[1] - input file
-//	argv[2] - restarts
-//	argv[3] - threads
-//	argv[4] - shared memory
 //
 int
 main(int argc, char *argv[]) {
@@ -891,58 +834,22 @@ main(int argc, char *argv[]) {
 
 
 	const int Threads = (argc >= 4) ? min(1024,next32(atoi(argv[3]))) : min(1024,next32(Cities));
-	const int TileSize = (argc >= 5) ? min( next32(atoi(argv[4])),2048) : Threads;
+	const int TileSize = (argc >= 5) ? min( next32(atoi(argv[4])),1024) : Threads;
 	
 	const float time = RunKernel(Cities,pos_d,Restarts,Threads,TileSize);
 	
-	cudaDeviceSynchronize();
-	
 	int hours = (int)(time / (3600.0f * 1000.0f));
 	int seconds = (int)(time/1000) % 60;
-	int minutes = (int)(time/1000) / 60;
+	int minutes = ((int)(time/1000) / 60) % 60;
 	
 	
-	int climbs,best;
-	cudaMemcpyFromSymbol(&climbs,climbs_d,sizeof(int),0,cudaMemcpyDeviceToHost);
-	cudaMemcpyFromSymbol(&best,best_d,sizeof(int),0,cudaMemcpyDeviceToHost);
-	
-	
-	
-#if DEBUG
-
-#if MICRO
-	long long pd,cd,ld;
-	cudaMemcpyFromSymbol(&pd,propagate_duration,sizeof(int),0,cudaMemcpyDeviceToHost);
-	cudaMemcpyFromSymbol(&cd,compute_duration,sizeof(int),0,cudaMemcpyDeviceToHost);
-	cudaMemcpyFromSymbol(&ld,load_duration,sizeof(int),0,cudaMemcpyDeviceToHost);
-#else
-	long long sd,ud;
-	
-	cudaMemcpyFromSymbol(&sd,single_duration,sizeof(int),0,cudaMemcpyDeviceToHost);
-	cudaMemcpyFromSymbol(&ud,update_duration,sizeof(int),0,cudaMemcpyDeviceToHost);
-#endif
-
-#endif
-	
-	long long moves = 1LL * climbs * (Cities - 2) * (Cities - 1) / 2;
+	long long moves = 1LL * climbs_d * (Cities - 2) * (Cities - 1) / 2;
 
 	std::cout << moves * 0.000001 / time << "Gmoves/s" << std::endl;
-	std::cout << "best found tour length = " << best << std::endl;
+	std::cout << "best found tour length = " << best_d << std::endl;
 	std::cout << "Total Time : " << time / 1000.0f << "s" << std::endl;
 	std::cout << "Hours = " << hours << ", Minutes = " << minutes << ", Seconds = " << seconds << ", Milliseconds = " << (int)(time) % 1000 << std::endl;
 
-#if DEBUG
-#if MICRO
-	std::cout << "Propagate: " << pd << std::endl;
-	std::cout << "Load: " << ld << std::endl;
-	std::cout << "Compute: " << cd << std::endl;
-#else
-	std::cout << "Single: " << sd << std::endl;
-	std::cout << "Update: " << ud << std::endl;
-#endif
-#endif
-	
-	
 	cudaDeviceReset();
 	cudaFree(pos_d);
 	return 0;

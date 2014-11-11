@@ -28,10 +28,6 @@ static __device__ __managed__ int climbs_d = 0;
 static __device__ __managed__ int best_d = INT_MAX;
 static __device__ int restart_d = 0;
 // Buffer space, used for cache and maximum propagation
-extern __shared__ char buffer[];	// Our pool of memory to hand out to other three
-__shared__ float *x_buffer;
-__shared__ float *y_buffer;
-__shared__ int   *w_buffer;
 
 enum ThreadBufferStatus {MORE_THREADS_THAN_BUFFER,EQUAL_SIZE,MORE_BUFFER_THAN_THREADS};
 
@@ -45,7 +41,7 @@ struct __align__(8) Data {
 //
 // @return  - Returns the next unique int
 static __device__ inline int
-nextInt() {
+nextInt(int* __restrict__ w_buffer) {
 	if(threadIdx.x==0) {
 		w_buffer[0] = atomicAdd(&restart_d,1);
 	}__syncthreads();
@@ -63,12 +59,13 @@ template <int TileSize>
 static inline __device__ bool
 initMemory(const Data* &pos_d, Data* &pos, int * &weight, const int &cities) {
 	__shared__ Data *d;
+	__shared__ int* w;
 	// Allocate my global memory
 	if(threadIdx.x == 0 ) {
 		d = new Data[cities + 1];
 		if(d != NULL) {
-			w_buffer = new int[cities];
-			if(w_buffer == NULL) {
+			w = new int[cities];
+			if(w == NULL) {
 				delete d;
 				d = NULL;
 			}
@@ -81,15 +78,10 @@ initMemory(const Data* &pos_d, Data* &pos, int * &weight, const int &cities) {
 	
 	// Save new memory locations
 	pos = d;
-	weight = w_buffer;
+	weight = w;
 	
 	for (int i = threadIdx.x; i < cities; i += blockDim.x) pos[i] = pos_d[i];
 	__syncthreads();
-	
-	// Initialize shared memory
-	x_buffer = (float*)buffer;
-	y_buffer = (float*)(buffer + sizeof(float) * TileSize);
-	w_buffer = (int*)(buffer + 2 * sizeof(float) * TileSize);
 	
 	return true;
 }
@@ -103,86 +95,78 @@ initMemory(const Data* &pos_d, Data* &pos, int * &weight, const int &cities) {
 // @return - The maximum value of t_val seen from all threads
 template <ThreadBufferStatus Status, int TileSize>
 static inline __device__ int
-maximum(int t_val, const int &cities) {
+maximum(int t_val, const int &cities, int* __restrict__ w_buffer) {
 	
 	int upper = min(blockDim.x,min(TileSize,cities));
-	const int Index = (Status == MORE_THREADS_THAN_BUFFER)?(threadIdx.x%TileSize):threadIdx.x;
-	w_buffer[Index] = t_val;
-	__syncthreads();
 	
 	if(Status == MORE_THREADS_THAN_BUFFER) {
-		for(int i = 0 ; i <= TileSize / blockDim.x; ++i ) {
-			if(w_buffer[Index] < t_val) {
-				w_buffer[Index] = t_val;
-			}
-		}__syncthreads();
-	}
-	
-	if (TileSize > 512) {
-		int offset = (upper + 1) / 2;
-		if( threadIdx.x + offset < upper ) {
-			w_buffer[Index] = t_val = min(t_val,w_buffer[Index + offset]);
-		}__syncthreads();
-		upper = offset;
-	}
-	if (TileSize > 256) {
-		int offset = (upper + 1) / 2;
-		if( threadIdx.x + offset < upper ) {
-			w_buffer[Index] = t_val = min(t_val,w_buffer[Index + offset]);
-		}__syncthreads();
-		upper = offset;
-	}
-	if (TileSize > 128) {
-		int offset = (upper + 1) / 2;
-		if( threadIdx.x + offset < upper ) {
-			w_buffer[Index] = t_val = min(t_val,w_buffer[Index + offset]);
-		}__syncthreads();
-		upper = offset;
-	}
-	if (TileSize > 64) {
-		int offset = (upper + 1) / 2;
-		if( threadIdx.x + offset < upper ) {
-			w_buffer[Index] = t_val = min(t_val,w_buffer[Index + offset]);
-		}__syncthreads();
-		upper = offset;
-	}
-	if(TileSize > 32) {
-		int offset = (upper + 1) / 2;
-		if( threadIdx.x + offset < upper ) {
-			w_buffer[Index] = t_val = min(t_val,w_buffer[Index + offset]);
-		}__syncthreads();
-		upper = offset;
-	}
-			
-	int offset = (upper + 1) / 2;
-	if( threadIdx.x + offset < upper ) {
-		w_buffer[Index] = t_val = min(t_val,w_buffer[Index + offset]);
-	}
-	upper = offset;
-	
-	offset = (upper + 1) / 2;
-	if( threadIdx.x + offset < upper ) {
-		w_buffer[Index] = t_val = min(t_val,w_buffer[Index + offset]);
-	}
-	upper = offset;
-	
-	offset = (upper + 1) / 2;
-	if( threadIdx.x + offset < upper ) {
-		w_buffer[Index] = t_val = min(t_val,w_buffer[Index + offset]);
-	}
-	upper = offset;
-	
-	offset = (upper + 1) / 2;
-	if( threadIdx.x + offset < upper ) {
-		w_buffer[Index] = t_val = min(t_val,w_buffer[Index + offset]);
-	}
-	upper = offset;
-	
-	offset = (upper + 1) / 2;
-	if( threadIdx.x + offset < upper ) {
-		w_buffer[Index] = t_val = min(t_val,w_buffer[Index + offset]);
+		int Index = threadIdx.x % TileSize;
+		w_buffer[Index] = t_val;
+		__syncthreads();
+		for(int i = 0 ; i <= (blockDim.x/TileSize); ++i ) {
+			w_buffer[Index] = t_val = min(t_val,w_buffer[Index]);
+		}
+	}else {
+		w_buffer[threadIdx.x] = t_val;
 	}__syncthreads();
 	
+	// 1024
+	if (TileSize > 512) {
+		int offset = (upper + 1) / 2;	// 200
+		if( threadIdx.x < offset) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x + offset]);
+		}__syncthreads();
+		upper = offset;
+	}
+	
+	// 512
+	if (TileSize > 256) {
+		int offset = (upper + 1) / 2; // 100
+		if( threadIdx.x < offset) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x + offset]);
+		}__syncthreads();
+		upper = offset;
+	}
+	
+	// 256
+	if (TileSize > 128) {
+		int offset = (upper + 1) / 2; // 50
+		if( threadIdx.x < offset) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x + offset]);
+		}__syncthreads();
+		upper = offset;
+	}
+	
+	// 128
+	if (TileSize > 64) {
+		int offset = (upper + 1) / 2; // 25
+		if( threadIdx.x < offset) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x + offset]);
+		}__syncthreads();
+		upper = offset;
+	}
+	
+	// 64 and down
+	if(threadIdx.x < 32) {
+		if(TileSize > 32 && blockDim.x > 32) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x+(upper+1)/2]);
+		}
+		if(threadIdx.x < 16) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x+16]);
+		}
+		if(threadIdx.x < 8) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x+8]);
+		}
+		if(threadIdx.x < 4) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x+4]);
+		}
+		if(threadIdx.x < 2) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x+2]);
+		}
+		if(threadIdx.x < 1) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x+1]);
+		}
+	}__syncthreads();
 	
 	return w_buffer[0];
 }
@@ -224,7 +208,7 @@ reverse(int start, int end, Data* &pos, int* &weight) {
 // @cities		- The number of cities along the path (excluding the end point)
 template <int TileSize>
 static __device__ void
-singleIter(Data* &pos, int* &weight, int &minchange, int &mini, int &minj, const int &cities) {
+singleIter(Data* &pos, int* &weight, int &minchange, int &mini, int &minj, const int &cities, float* __restrict__ x_buffer, float* __restrict__ y_buffer, int* __restrict__ w_buffer) {
 	
 
 	for (int ii = 0; ii < cities - 2; ii += blockDim.x) {
@@ -296,9 +280,9 @@ singleIter(Data* &pos, int* &weight, int &minchange, int &mini, int &minj, const
 // @cities		- The number of cities along the path (excluding the end point)
 template <ThreadBufferStatus Status, int TileSize>
 static __device__ bool
-update(Data* &pos, int* &weight, int &minchange, int &mini, int &minj, const int &cities) {
+update(Data* &pos, int* &weight, int &minchange, int &mini, int &minj, const int &cities, int* __restrict__ w_buffer) {
 
-	maximum<Status,TileSize>(minchange, cities);
+	maximum<Status,TileSize>(minchange, cities, w_buffer);
 	if(w_buffer[0] >= 0) return false;
 	
 	if (minchange == w_buffer[0]) {
@@ -351,6 +335,25 @@ permute(Data* &pos, int* &weight, const int &cities) {
 	
 }
 
+//
+// Releases memory and saves results
+//
+// @pos				- Pointer to allocated path memory
+// @weight			- Pointer to allocated edge weight memory
+// @local_climbs	- The number of climbs performed by this block
+// @best_length		- The best length this block found.
+static __device__ inline void
+cleanup(Data* &pos, int* &weight, int &local_climbs, int &best_length) {
+	if (threadIdx.x == 0) {
+		// Save data
+		atomicAdd(&climbs_d,local_climbs);
+		atomicMin(&best_d, best_length);
+		
+		// Release memory
+		delete pos;
+		delete weight;
+	}
+}
 
 //
 // Perform iterative two-opt until there can be no more swaps to reduce the path length.
@@ -373,8 +376,11 @@ TwoOpt(const int Restarts, const Data *pos_d, const int cities) {
 		return;
 	}
 	
+	__shared__ float	x_buffer[TileSize];
+	__shared__ float	y_buffer[TileSize];
+	__shared__ int		w_buffer[TileSize];
 	
-	for(int r = nextInt() ; r < Restarts; r = nextInt()) {
+	for(int r = nextInt(w_buffer) ; r < Restarts; r = nextInt(w_buffer)) {
 	
 		int mini,minj,minchange;
 		
@@ -383,8 +389,8 @@ TwoOpt(const int Restarts, const Data *pos_d, const int cities) {
 		do {
 			++local_climbs;
 			minchange = mini = minj = 0;
-			singleIter<TileSize>(pos, weight, minchange, mini, minj, cities);
-		} while (update<Status,TileSize>(pos, weight, minchange, mini, minj, cities));
+			singleIter<TileSize>(pos, weight, minchange, mini, minj, cities, x_buffer, y_buffer, w_buffer);
+		} while (update<Status,TileSize>(pos, weight, minchange, mini, minj, cities, w_buffer));
 	
 		w_buffer[0] = 0;
 		__syncthreads();
@@ -402,16 +408,7 @@ TwoOpt(const int Restarts, const Data *pos_d, const int cities) {
 		}
 		
 	}
-	
-  if (threadIdx.x == 0) {
-	// Save data
-	atomicAdd(&climbs_d,local_climbs);
-    atomicMin(&best_d, best_length);
-	
-	// Release memory
-	delete pos;
-	delete weight;
-  }
+	cleanup(pos, weight, local_climbs, best_length);
 }
 
 
@@ -567,8 +564,12 @@ _wrapStatus(const int Restarts, const int Threads, const Data *Pos_d, const int 
 	const ThreadBufferStatus Status = (Threads > TileSize) ? MORE_THREADS_THAN_BUFFER : (Threads < TileSize) ? MORE_BUFFER_THAN_THREADS : EQUAL_SIZE;
 	float time;
 
+	const int DeviceBytes = 2 * (sizeof(int) + sizeof(Data)) * (Cities + 1) * Blocks;
+	cudaDeviceSetLimit(cudaLimitMallocHeapSize, DeviceBytes);
+	CudaTest("cudaDeviceSetLimit");
+	
 	// Output runtime configuration
-	std::cout << "Blocks = " << Blocks << ", Threads  = " << Threads << ", TileSize = " << TileSize << ", Status = " << getName(Status) << ", Shared Bytes = " << Shared_Bytes << std::endl;
+	std::cout << "Blocks = " << Blocks << ", Threads  = " << Threads << ", TileSize = " << TileSize << ", Status = " << getName(Status) << ", Shared Bytes = " << Shared_Bytes << ", Device Bytes = " << DeviceBytes << std::endl;
 
 	cudaEvent_t begin,end;
 	cudaEventCreate(&begin);
@@ -577,21 +578,21 @@ _wrapStatus(const int Restarts, const int Threads, const Data *Pos_d, const int 
 	switch(Status) {
 		case MORE_THREADS_THAN_BUFFER:
 			cudaEventRecord(begin,0);
-			TwoOpt<MORE_THREADS_THAN_BUFFER,TileSize><<<Blocks,Threads,Shared_Bytes>>>(Restarts,Pos_d,Cities);
+			TwoOpt<MORE_THREADS_THAN_BUFFER,TileSize><<<Blocks,Threads>>>(Restarts,Pos_d,Cities);
 			CudaTest("Kernel Call");
 			cudaEventRecord(end,0);
 			cudaEventSynchronize(end);
 			break;
 		case EQUAL_SIZE:
 			cudaEventRecord(begin,0);
-			TwoOpt<EQUAL_SIZE,TileSize><<<Blocks,Threads,Shared_Bytes>>>(Restarts,Pos_d,Cities);
+			TwoOpt<EQUAL_SIZE,TileSize><<<Blocks,Threads>>>(Restarts,Pos_d,Cities);
 			CudaTest("Kernel Call");
 			cudaEventRecord(end,0);
 			cudaEventSynchronize(end);
 			break;
 		case MORE_BUFFER_THAN_THREADS:
 			cudaEventRecord(begin,0);
-			TwoOpt<MORE_BUFFER_THAN_THREADS,TileSize><<<Blocks,Threads,Shared_Bytes>>>(Restarts,Pos_d,Cities);
+			TwoOpt<MORE_BUFFER_THAN_THREADS,TileSize><<<Blocks,Threads>>>(Restarts,Pos_d,Cities);
 			CudaTest("Kernel Call");
 			cudaEventRecord(end,0);
 			cudaEventSynchronize(end);

@@ -200,77 +200,78 @@ initMemory(const Data* &pos_d, Data* &pos, int * &weight, const int cities) {
 template <int Reductions,ThreadBufferStatus Status, int TileSize>
 static inline __device__ int
 maximum(int t_val, const int cities) {
-	
 	int upper = min(blockDim.x,min(TileSize,cities));
-	const int Index = (Status == MORE_THREADS_THAN_BUFFER)?(threadIdx.x%TileSize):threadIdx.x;
-	sW(Index, t_val);
-	__syncthreads();
 	
 	if(Status == MORE_THREADS_THAN_BUFFER) {
-		for(int i = 0 ; i <= TileSize / blockDim.x; ++i ) {
-			if(gW(Index) < t_val) {
-				sW(Index, t_val);
-			}
-		}__syncthreads();
-	}
-	
-	if (TileSize > 512) {
-		int offset = (upper + 1) / 2;
-		if( threadIdx.x < offset ) {
-			sW(threadIdx.x,t_val = min(t_val,gW(threadIdx.x + offset)));
-		}__syncthreads();
-		upper = offset;
-	}
-	if (TileSize > 256) {
-		int offset = (upper + 1) / 2;
-		if( threadIdx.x < offset ) {
-			sW(threadIdx.x,t_val = min(t_val,gW(threadIdx.x + offset)));
-		}__syncthreads();
-		upper = offset;
-	}
-	if (TileSize > 128) {
-		int offset = (upper + 1) / 2;
-		if( threadIdx.x < offset ) {
-			sW(threadIdx.x,t_val = min(t_val,gW(threadIdx.x + offset)));
-		}__syncthreads();
-		upper = offset;
-	}
-	if (TileSize > 64) {
-		int offset = (upper + 1) / 2;
-		if( threadIdx.x < offset ) {
-			sW(threadIdx.x,t_val = min(t_val,gW(threadIdx.x + offset)));
-		}__syncthreads();
-		upper = offset;
-	}
-	if(TileSize > 32) {
-		int offset = (upper + 1) / 2;
-		if( threadIdx.x < offset ) {
-			sW(threadIdx.x,t_val = min(t_val,gW(threadIdx.x + offset)));
-		}__syncthreads();
-	}
-	
-	if( threadIdx.x < 16 ) {
-		sW(threadIdx.x,t_val = min(t_val,gW(threadIdx.x+ 16)));
-	}
-	
-	if( threadIdx.x < 8 ) {
-		sW(threadIdx.x,t_val = min(t_val,gW(threadIdx.x+ 8)));
-	}
-	
-	if( threadIdx.x < 4 ) {
-		sW(threadIdx.x,t_val = min(t_val,gW(threadIdx.x+ 4)));
-	}
-	
-	if( threadIdx.x < 2 ) {
-		sW(threadIdx.x,t_val = min(t_val,gW(threadIdx.x+ 2)));
-	}
-	
-	if( threadIdx.x < 1 ) {
-		sW(threadIdx.x,t_val = min(t_val,gW(1)));
+		int Index = threadIdx.x % TileSize;
+		w_buffer[Index] = t_val;
+		__syncthreads();
+		for(int i = 0 ; i <= (blockDim.x/TileSize); ++i ) {
+			w_buffer[Index] = t_val = min(t_val,w_buffer[Index]);
+		}
+	}else {
+		w_buffer[threadIdx.x] = t_val;
 	}__syncthreads();
 	
+	// 1024
+	if (TileSize > 512) {
+		int offset = (upper + 1) / 2;	// 200
+		if( threadIdx.x < offset) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x + offset]);
+		}__syncthreads();
+		upper = offset;
+	}
 	
-	return gW(0);
+	// 512
+	if (TileSize > 256) {
+		int offset = (upper + 1) / 2; // 100
+		if( threadIdx.x < offset) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x + offset]);
+		}__syncthreads();
+		upper = offset;
+	}
+	
+	// 256
+	if (TileSize > 128) {
+		int offset = (upper + 1) / 2; // 50
+		if( threadIdx.x < offset) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x + offset]);
+		}__syncthreads();
+		upper = offset;
+	}
+	
+	// 128
+	if (TileSize > 64) {
+		int offset = (upper + 1) / 2; // 25
+		if( threadIdx.x < offset) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x + offset]);
+		}__syncthreads();
+		upper = offset;
+	}
+	
+	// 64 and down
+	if(threadIdx.x < 32) {
+		if(TileSize > 32) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x+(upper+1)/2]);
+		}
+		if(threadIdx.x < 16) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x+16]);
+		}
+		if(threadIdx.x < 8) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x+8]);
+		}
+		if(threadIdx.x < 4) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x+4]);
+		}
+		if(threadIdx.x < 2) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x+2]);
+		}
+		if(threadIdx.x < 1) {
+			w_buffer[threadIdx.x] = t_val = min(t_val,w_buffer[threadIdx.x+1]);
+		}
+	}__syncthreads();
+	
+	return w_buffer[0];
 }
 
 
@@ -461,6 +462,25 @@ permute(Data* &pos, int* &weight, const int cities) {
 }
 
 
+//
+// Releases memory and saves results
+//
+// @pos				- Pointer to allocated path memory
+// @weight			- Pointer to allocated edge weight memory
+// @local_climbs	- The number of climbs performed by this block
+// @best_length		- The best length this block found.
+static __device__ void inline
+cleanup(Data* &pos, int* &weight, int &local_climbs, int &best_length) {
+	if (threadIdx.x == 0) {
+		// Save data
+		atomicAdd(&climbs_d,local_climbs);
+		atomicMin(&best_d, best_length);
+		
+		// Release memory
+		delete pos;
+		delete weight;
+	}
+}
 
 //
 // Description :
@@ -514,16 +534,7 @@ TwoOpt(const int Restarts, const Data *pos_d, const int cities) {
 		}
 
 	}
-
-  if (threadIdx.x == 0) {
-	// Save data
-	atomicAdd(&climbs_d,local_climbs);
-    atomicMin(&best_d, best_length);
-
-	// Release memory
-	delete pos;
-	delete weight;
-  }
+	cleanup(pos, weight, local_climbs, best_length);
 }
 
 

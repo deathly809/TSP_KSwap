@@ -125,14 +125,16 @@ struct __align__(8) Data {
 	float x,y;
 };
 
+#define SET_SIZE 10
+
 //
 // Returns a unique integer value with the intial value being 0
 //
 // @return  - Returns the next unique int
 static __device__ inline int
-nextInt(int* __restrict__ w_buffer) {
+nextInt(int* __restrict__ w_buffer, const int &Restarts) {
 	if(threadIdx.x==0) {
-		w_buffer[0] = atomicAdd(&restart_d,1);
+		w_buffer[0] = min(Restarts - atomicAdd(&restart_d,SET_SIZE),SET_SIZE);
 	}__syncthreads();
 	return w_buffer[0];
 }
@@ -524,39 +526,41 @@ TwoOpt(const int Restarts, const Data *pos_d, const int cities) {
 		return;
 	}
 	
-	for(int r = nextInt(w_buffer) ; r < Restarts; r = nextInt(w_buffer)) {
+	for( int r = nextInt(w_buffer,Restarts) ; r > 0 ; r = nextInt(w_buffer,Restarts) ) {
 	
-		int mini,minj,minchange;
-		
-		permute(pos,weight,cities);
-	  
 		do {
-			++local_climbs;
-			minchange = mini = minj = 0;
-			singleIter<TileSize>(pos, weight, minchange, mini, minj, cities, x_buffer, y_buffer, w_buffer);
-		} while (update<Status,TileSize>(pos, weight, minchange, mini, minj, cities, w_buffer));
-	
-		w_buffer[0] = 0;
-		__syncthreads();
-		int term = 0;
-		for (int i = threadIdx.x; i < cities; i += blockDim.x) {
-			term += dist(i, i + 1);
-		}
-		atomicAdd(w_buffer,term);
-		__syncthreads();
-
-		if(threadIdx.x == 0) {
-			if(w_buffer[0] < best_length) {
-				best_length = w_buffer[0];
-			}
-		}
+			int mini,minj,minchange;
+			
+			permute(pos,weight,cities);
+		  
+			do {
+				++local_climbs;
+				minchange = mini = minj = 0;
+				singleIter<TileSize>(pos, weight, minchange, mini, minj, cities, x_buffer, y_buffer, w_buffer);
+			} while (update<Status,TileSize>(pos, weight, minchange, mini, minj, cities, w_buffer));
 		
+			w_buffer[0] = 0;
+			__syncthreads();
+			int term = 0;
+			for (int i = threadIdx.x; i < cities; i += blockDim.x) {
+				term += dist(i, i + 1);
+			}
+			atomicAdd(w_buffer,term);
+			__syncthreads();
+
+			if(threadIdx.x == 0) {
+				if(w_buffer[0] < best_length) {
+					best_length = w_buffer[0];
+				}
+			}
+			
+		} while( --r );
 	}
 	
 	cleanup(pos, weight, local_climbs, best_length);
-	
+#if DEBUG	
 	if(threadIdx.x==0) {
-#if DEBUG
+
 
 #if MICRO
 		atomicAdd(&d_lDuration,load_duration[blockIdx.x]);
@@ -566,8 +570,8 @@ TwoOpt(const int Restarts, const Data *pos_d, const int cities) {
 		atomicAdd(&d_uDuration,update_duration[blockIdx.x]);
 		atomicAdd(&d_sDuration,single_duration[blockIdx.x]);
 #endif
-#endif
 	}
+#endif
 }
 
 
@@ -671,16 +675,6 @@ getName(const ThreadBufferStatus status) {
 }
 
 
-int getMaxSharedMemory( int major ) {
-	if(major < 3) {
-		return 16384;
-	}else if(major < 5) {
-		return 32768;
-	}else {
-		return 65536;
-	}
-}
-
 //
 // Calculates the maximum number of resident blocks that the card can hold
 //
@@ -700,7 +694,7 @@ getMaxBlocks(const int Shared_Bytes, const int Threads) {
 		const int Block_Shared_Limit = (Max_Shared / Shared_Bytes);
 		return props.multiProcessorCount * min(8,min(Block_Shared_Limit,(int)(2048/Threads)));
 	}else if(props.major < 5) {
-		const int Max_Shared = 49152;
+		const int Max_Shared = 32768;
 		const int Block_Shared_Limit = (Max_Shared / Shared_Bytes);
 		return props.multiProcessorCount * max(16,min(Block_Shared_Limit,(int)(2048/Threads)));
 	}else {
@@ -731,7 +725,7 @@ static float
 _wrapStatus(const int Restarts, const int Threads, const Data *Pos_d, const int Cities) {
 
 	const int Shared_Bytes = (sizeof(int) + 2*sizeof(float)) * TileSize;
-	const int Blocks = 2 * min(Restarts,getMaxBlocks(Shared_Bytes,Threads));
+	const int Blocks = min(Restarts,getMaxBlocks(Shared_Bytes,Threads));
 	const ThreadBufferStatus Status = (Threads > TileSize) ? MORE_THREADS_THAN_BUFFER : (Threads < TileSize) ? MORE_BUFFER_THAN_THREADS : EQUAL_SIZE;
 	float time;
 
@@ -746,7 +740,7 @@ _wrapStatus(const int Restarts, const int Threads, const Data *Pos_d, const int 
 	cudaEventCreate(&begin);
 	cudaEventCreate(&end);
 	cudaDeviceSetSharedMemConfig(cudaSharedMemBankSizeEightByte);
-	cudaThreadSetCacheConfig( cudaFuncCachePreferShared  );
+
 	switch(Status) {
 		case MORE_THREADS_THAN_BUFFER:
 			cudaEventRecord(begin,0);
@@ -850,16 +844,6 @@ RunKernel(const int Cities, const Data *Pos, const int Restarts, const int Threa
 		case 1024:
 			return _wrapStatus<1024>(Restarts,Threads,Pos,Cities);
 		default:
-			cudaDeviceProp props;
-			cudaGetDeviceProperties(&props,0);
-			int sharedMemBytes = getMaxSharedMemory( props.major ) / (2 * (sizeof(int) + 2 * sizeof(float)));
-			if( sharedMemBytes < 1344 && sharedMemBytes >= 1024 ) {
-				return _wrapStatus<1024>(Restarts,Threads,Pos,Cities);
-			} else if( sharedMemBytes < 2048 && sharedMemBytes >= 1344 ) {
-				return _wrapStatus<1344>(Restarts,Threads,Pos,Cities);
-			}else if( sharedMemBytes >= 2048 ) {
-				return _wrapStatus<2048>(Restarts,Threads,Pos,Cities);
-			}
 			std::cout << "Invalid TileSize = " << TileSize << std::endl;
 			exit(-1);
 	};
@@ -869,13 +853,6 @@ RunKernel(const int Cities, const Data *Pos, const int Restarts, const int Threa
 
 //
 //	Main entry point to program.
-//
-//
-//	argv[0] - program name
-//	argv[1] - input file
-//	argv[2] - restarts
-//	argv[3] - threads
-//	argv[4] - shared memory
 //
 int
 main(int argc, char *argv[]) {
@@ -891,7 +868,7 @@ main(int argc, char *argv[]) {
 
 
 	const int Threads = (argc >= 4) ? min(1024,next32(atoi(argv[3]))) : min(1024,next32(Cities));
-	const int TileSize = (argc >= 5) ? min( next32(atoi(argv[4])),2048) : Threads;
+	const int TileSize = (argc >= 5) ? min( next32(atoi(argv[4])),1024) : Threads;
 	
 	const float time = RunKernel(Cities,pos_d,Restarts,Threads,TileSize);
 	
