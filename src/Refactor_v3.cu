@@ -524,19 +524,27 @@ getMaxBlocks(const int Shared_Bytes, const int Threads) {
 	cudaDeviceProp props;
 	cudaGetDeviceProperties(&props,0);
 
+	int Max_Shared = 0;
+	int Max_Blocks = 0;
+	
 	if(props.major < 3) {
-		const int Max_Shared = 16384;
-		const int Block_Shared_Limit = (Max_Shared / Shared_Bytes);
-		return props.multiProcessorCount * min(8,min(Block_Shared_Limit,(int)(2048/Threads)));
+		Max_Shared = 16384;
+		Max_Blocks = 8;
 	}else if(props.major < 5) {
-		const int Max_Shared = 32768;
-		const int Block_Shared_Limit = (Max_Shared / Shared_Bytes);
-		return props.multiProcessorCount * min(16,min(Block_Shared_Limit,(int)(2048/Threads)));
+		Max_Shared = 32768;
+		Max_Blocks = 16;
 	}else {
-		const int Max_Shared = 65536;
-		const int Block_Shared_Limit = (Max_Shared / Shared_Bytes);
-		return props.multiProcessorCount * min(32,min(Block_Shared_Limit,(int)(2048/Threads)));
+		Max_Shared = 65536;
+		Max_Blocks = 32;
 	}
+	
+	std::cout << "Number of processors: " << props.multiProcessorCount << std::endl;
+	std::cout << "Maximum Shared Memory Size: " << Max_Shared << std::endl;
+	std::cout << "Maximum Number of Blocks: " << Max_Blocks << std::endl;
+	std::cout << "Requested Shared Memory: " << Shared_Bytes << std::endl;
+	const int Block_Shared_Limit = (Max_Shared / Shared_Bytes);
+	
+	return props.multiProcessorCount * min(Max_Blocks,min(Block_Shared_Limit,(int)(2048/Threads)));
 }
 
 
