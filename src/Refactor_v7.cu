@@ -1,5 +1,4 @@
 
-
 // C++
 #include <iostream>
 #include <string>
@@ -24,32 +23,6 @@
 
 #define QUEUE 0
 
-// CUDA is dumb
-__device__ static float atomicMin(float* address, float val)
-{
-	int* address_as_i = (int*) address;
-	int old = *address_as_i, assumed;
-	do {
-		assumed = old;
-		old = ::atomicCAS(address_as_i, assumed,
-			__float_as_int(::fminf(val, __int_as_float(assumed))));
-	} while (assumed != old);
-	return __int_as_float(old);
-}
-
-__device__ float atomicAdd(float* address, float val)
-{
-    unsigned long long int* address_as_ull =
-                             (unsigned long long int*)address;
-    unsigned long long int old = *address_as_ull, assumed;
-    do {
-        assumed = old;
-old = atomicCAS(address_as_ull, assumed,
-                        __double_as_longlong(val +
-                               __longlong_as_double(assumed)));
-    } while (assumed != old);
-    return __longlong_as_double(old);
-}
 
 
 #if QUEUE
@@ -63,11 +36,11 @@ const int SliceSize = 100;
 /******************************************************************************/
 
 // Euclidean distance
-#define dist(a, b) (sqrtf((pos[a].x - pos[b].x) * (pos[a].x - pos[b].x) + (pos[a].y - pos[b].y) * (pos[a].y - pos[b].y)))
+#define dist(a, b) __float2int_rn(sqrtf((pos[a].x - pos[b].x) * (pos[a].x - pos[b].x) + (pos[a].y - pos[b].y) * (pos[a].y - pos[b].y)))
 #define swap(a, b) {float tmp = a;  a = b;  b = tmp;}
 
 static __device__ int climbs_d = 0;
-static __device__ float best_d = INT_MAX;
+static __device__ int best_d = INT_MAX;
 #if QUEUE
 static __device__ int restart_d = 0;
 #endif
@@ -182,7 +155,7 @@ struct __align__(8) Data {
 // @return  - Returns the next unique int
 //
 static __device__ inline int
-nextSlice(float* __restrict__ w_buffer) {
+nextSlice(int* __restrict__ w_buffer) {
 	if(threadIdx.x==0) {
 		w_buffer[0] = atomicAdd(&restart_d, SliceSize);
 	}__syncthreads();
@@ -201,15 +174,15 @@ nextSlice(float* __restrict__ w_buffer) {
 //
 template <int TileSize>
 static inline __device__ bool
-initMemory(const Data* &pos_d, Data* &pos, float* &weight, const int &cities) {
+initMemory(const Data* &pos_d, Data* &pos, int * &weight, const int &cities) {
 	// Shared memory is required to share the allocated memory
 	__shared__ Data *d;
-	__shared__ float *w;
+	__shared__ int *w;
 
 	if(threadIdx.x == 0 ) {
 		d = new Data[cities + 1];
 		if( d != NULL ) {
-			w = new float[cities];
+			w = new int[cities];
 			if( w == NULL ) {
 				delete[] d;
 				d = NULL;
@@ -232,7 +205,7 @@ initMemory(const Data* &pos_d, Data* &pos, float* &weight, const int &cities) {
 }
 
 //
-// Each thread gives some floating point value, then the maximum of them is returned.
+// Each thread gives some integer value, then the maximum of them is returned.
 //
 // @t_val  - The number that the thread submits as a candidate for the maximum value
 // @cities - The number of cities.
@@ -240,7 +213,7 @@ initMemory(const Data* &pos_d, Data* &pos, float* &weight, const int &cities) {
 // @return - The maximum value of t_val seen from all threads
 template <ThreadBufferStatus Status, int TileSize>
 static inline __device__ int
-maximum(float t_val, const int &cities, float* __restrict__ &w_buffer) {
+maximum(int t_val, const int &cities, int* __restrict__ &w_buffer) {
 	LOG( propagate_start );
 	int upper = min(blockDim.x,min(TileSize,cities));
 
@@ -268,7 +241,7 @@ maximum(float t_val, const int &cities, float* __restrict__ &w_buffer) {
 		if (TileSize > i && blockDim.x > i) {
 			int offset = (upper + 1) / 2;
 			if( threadIdx.x < offset) {
-				float tmp = w_buffer[threadIdx.x + offset];
+				int tmp = w_buffer[threadIdx.x + offset];
 				if(tmp < t_val) {
 					w_buffer[threadIdx.x] = t_val = tmp;
 				}
@@ -282,7 +255,7 @@ maximum(float t_val, const int &cities, float* __restrict__ &w_buffer) {
 		// Yes.  upper = 32.  w_buffer[tid] = t_val = min(t_val,w_buffer[threadIdx.x + 16]
 
 		if(TileSize > 32 && blockDim.x > 32) {
-			float tmp = w_buffer[threadIdx.x + (upper+1)/2];
+			int tmp = w_buffer[threadIdx.x + (upper+1)/2];
 			if(tmp < t_val) {
 				w_buffer[threadIdx.x] = t_val = tmp;
 			}
@@ -290,7 +263,7 @@ maximum(float t_val, const int &cities, float* __restrict__ &w_buffer) {
 
 		for( int i = 16; i > 0; i = i / 2 ) {
 			if(threadIdx.x < i) {
-				float tmp = w_buffer[threadIdx.x + i];
+				int tmp = w_buffer[threadIdx.x + i];
 				if(tmp < t_val) {
 					w_buffer[threadIdx.x] = t_val = tmp;
 				}
@@ -313,11 +286,11 @@ maximum(float t_val, const int &cities, float* __restrict__ &w_buffer) {
 //	TODO: Is it better to reverse the weight or just recompute it?
 //
 static inline __device__ void
-reverse(int start, int end, Data* &pos, float* &weight) {
+reverse(int start, int end, Data* &pos, int* &weight) {
 
 	while(start<end) {
 
-		float w = weight[start];
+		int   w = weight[start];
 		Data d = pos[start];
 
 		weight[start] = weight[end-1];
@@ -342,7 +315,7 @@ reverse(int start, int end, Data* &pos, float* &weight) {
 // @cities		- The number of cities along the path (excluding the end point)
 template <int TileSize>
 static __device__ void
-singleIter(Data* &pos, float* &weight, float &minchange, int &mini, int &minj, const int &cities, float* __restrict__ x_buffer, float* __restrict__ y_buffer, float* __restrict__ w_buffer) {
+singleIter(Data* &pos, int* &weight, int &minchange, int &mini, int &minj, const int &cities, float* __restrict__ x_buffer, float* __restrict__ y_buffer, int* __restrict__ w_buffer) {
 	LOG( single_start );
 
 	//
@@ -411,9 +384,9 @@ singleIter(Data* &pos, float* &weight, float &minchange, int &mini, int &minj, c
 
 				float pxj0 = x_buffer[cache_idx];
 				float pyj0 = y_buffer[cache_idx];
-				float change = w_buffer[cache_idx]
-					+ (sqrtf((pxi0 - pxj0) * (pxi0 - pxj0) + (pyi0 - pyj0) * (pyi0 - pyj0)))
-					+ (sqrtf((pxi1 - pxj1) * (pxi1 - pxj1) + (pyi1 - pyj1) * (pyi1 - pyj1)));
+				int change = w_buffer[cache_idx]
+					+ __float2int_rn(sqrtf((pxi0 - pxj0) * (pxi0 - pxj0) + (pyi0 - pyj0) * (pyi0 - pyj0)))
+					+ __float2int_rn(sqrtf((pxi1 - pxj1) * (pxi1 - pxj1) + (pyi1 - pyj1) * (pyi1 - pyj1)));
 
 				// Shift down
 				pxj1 = pxj0;
@@ -449,7 +422,7 @@ singleIter(Data* &pos, float* &weight, float &minchange, int &mini, int &minj, c
 // @cities		- The number of cities along the path (excluding the end point)
 template <ThreadBufferStatus Status, int TileSize>
 static __device__ bool
-update(Data* &pos, float* &weight, float &minchange, int &mini, int &minj, const int &cities, float* __restrict__ w_buffer) {
+update(Data* &pos, int* &weight, int &minchange, int &mini, int &minj, const int &cities, int* __restrict__ w_buffer) {
 
 	LOG( update_start );
 
@@ -477,8 +450,8 @@ update(Data* &pos, float* &weight, float &minchange, int &mini, int &minj, const
 		}__syncthreads();
 
 		// Give them to each thread
-		int mi = (int)w_buffer[2];
-		int mj = (int)w_buffer[3];
+		int mi = w_buffer[2];
+		int mj = w_buffer[3];
 
 		// If we are overlapping the best then we can't be used
 		if(!(minj < (mi - 1)) && !(mini > (mj + 1))) {
@@ -509,7 +482,7 @@ update(Data* &pos, float* &weight, float &minchange, int &mini, int &minj, const
 // @weight		- The current weight of our edges along the path
 // @cities		- The number of cities along the path (excluding the end point)
 static __device__ inline void
-permute(Data* &pos, float* &weight, const int &cities, curandState &rndstate) {
+permute(Data* &pos, int* &weight, const int &cities, curandState &rndstate) {
 
 	if (threadIdx.x == 0) {  // serial permutation
 		for (int i = 1; i < cities; i++) {
@@ -537,7 +510,7 @@ permute(Data* &pos, float* &weight, const int &cities, curandState &rndstate) {
 // @local_climbs	- The number of climbs performed by this block
 // @best_length		- The best length this block found.
 static __device__ inline void
-cleanup(Data* &pos, float* &weight, int &local_climbs, float &best_length) {
+cleanup(Data* &pos, int* &weight, int &local_climbs, int &best_length) {
 	if (threadIdx.x == 0) {
 		// Save data
 		atomicAdd(&climbs_d,local_climbs);
@@ -575,10 +548,10 @@ static __global__ __launch_bounds__(1024, 2) void
 TwoOpt(const int Restarts, const Data *pos_d, const int cities) {
 
 
-	Data*	pos;
-	float*	weight;
+	Data	*pos;
+	int 	*weight;
 	int 	local_climbs = 0;
-	float	best_length = INT_MAX;
+	int		best_length = INT_MAX;
 
 	curandState rndstate;
 	//curand_init(blockIdx.x , 0, 0, &rndstate);
@@ -622,7 +595,7 @@ TwoOpt(const int Restarts, const Data *pos_d, const int cities) {
 			// Calculate the length of the path
 			w_buffer[0] = 0;
 			__syncthreads();
-			float term = 0;
+			int term = 0;
 			for (int i = threadIdx.x; i < cities; i += blockDim.x) {
 				term += dist(i, i + 1);
 			}

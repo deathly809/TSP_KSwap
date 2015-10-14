@@ -14,6 +14,21 @@ SRC=src
 # Compiler command
 COMP=$(GCC) $(CMP) $(OPT) $(ARCH3)
 
+0: $(BIN)/Refactor_v7.exe
+
+1: $(BIN)/Refactor_v7.exe
+
+2: $(BIN)/Refactor_v7.exe
+
+3: $(BIN)/Refactor_v7.exe
+4: $(BIN)/Refactor_v7.exe
+
+5: $(BIN)/Refactor_v7.exe
+
+6: $(BIN)/Refactor_v7.exe
+
+7: $(BIN)/Refactor_v7.exe
+
 all:	$(BIN)/Refactor_v0.exe $(BIN)/Refactor_v1.exe $(BIN)/Refactor_v2.exe $(BIN)/Refactor_v3.exe $(BIN)/Refactor_v3a.exe $(BIN)/Refactor_v4.exe \
 		$(BIN)/Refactor_v4a.exe $(BIN)/Refactor_v4b.exe $(BIN)/Refactor_v4c.exe $(BIN)/KSwaps.exe $(BIN)/TSP_GPU21.exe \
 		$(BIN)/Refactor_v5.exe
@@ -52,10 +67,14 @@ $(BIN)/Refactor_v4b.exe : $(SRC)/Refactor_v4b.cu
 
 $(BIN)/Refactor_v4c.exe : $(SRC)/Refactor_v4c.cu
 	$(COMP) $(SRC)/Refactor_v4c.cu -o $(BIN)/Refactor_v4c.exe
-	@echoi .
+	@echo .
 
-$(BIN)/Refactor_v5.exe : $(SRC)/Refactor_v5.cu
-	$(COMP) $(SRC)/Refactor_v5.cu -o $(BIN)/Refactor_v5.exe
+$(BIN)/Refactor_v6.exe : $(SRC)/Refactor_v6.cu
+	$(COMP) $(SRC)/Refactor_v6.cu -o $(BIN)/Refactor_v6.exe
+	@echo .
+	
+$(BIN)/Refactor_v7.exe : $(SRC)/Refactor_v7.cu
+	$(COMP) $(SRC)/Refactor_v7.cu -o $(BIN)/Refactor_v7.exe
 	@echo .
 
 
